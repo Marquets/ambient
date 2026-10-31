@@ -31,7 +31,7 @@ export function Knob({ label, value, min, max, initial, small, big, selected, on
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
   const step = (max - min) / STEPS;
   const sweep = ((value - min) / (max - min)) * 270;
-  // Small knobs light up in their line colour, the main ones in orange and the volume in a hotter one
+  // One colour each for the small knobs, the main ones and the volume; all white over the sky (globals.css)
   const accent = small ? "text-line" : big ? "text-vivo" : "text-knob";
 
   function onPointerDown(e: PointerEvent<HTMLDivElement>) {
@@ -78,7 +78,7 @@ export function Knob({ label, value, min, max, initial, small, big, selected, on
         onPointerCancel={onPointerUp}
         onDoubleClick={() => onChange(initial)}
         onKeyDown={onKeyDown}
-        className={`relative ${small ? "size-8" : big ? "size-14 hd:size-11 hd2:size-14" : "size-11 hd:size-10 hd2:size-12"} ${accent} ${onSelect ? "cursor-pointer" : "cursor-ns-resize"} ${selected ? "ring-2 ring-activo ring-offset-4 ring-offset-fondo" : ""} touch-none rounded-full outline-offset-6 focus-visible:outline-2 focus-visible:outline-accent`}
+        className={`relative ${small ? "size-8" : big ? "size-14" : "size-11"} ${accent} ${onSelect ? "cursor-pointer" : "cursor-ns-resize"} ${selected ? "ring-2 ring-activo ring-offset-4 ring-offset-transparent" : ""} touch-none rounded-full outline-offset-6 focus-visible:outline-2 focus-visible:outline-accent`}
       >
         {TICKS.map((tick, i) => (
           <div key={tick} aria-hidden className="absolute -inset-[5px]" style={{ rotate: `${tick}deg` }}>

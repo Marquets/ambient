@@ -1,4 +1,4 @@
-# 🌥️ Ambient
+# 🌥️ Le Ciel
 
 Un sinte generativo de Discos Madera: notas que caen solas sobre una escala, un cielo de nubes que reacciona al sonido, looper, MIDI y knobs asignables. Todo suena en el navegador con Web Audio, sin servidor.
 

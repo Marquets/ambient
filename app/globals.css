@@ -5,30 +5,13 @@
   --font-display: var(--font-anton);
   --font-mono: var(--font-space-mono);
   --color-accent: #f89028;
-  /* The panel, after a hardware sequencer but in Discos Madera's warm colours: a near-black
-     ground, cream lines, the brand orange on the knobs, a hotter orange for the volume and the
-     wave keys, and the sky's blue for whatever is switched on */
+  /* The controls float over the sky, so they are all white: lines, knobs, the volume and
+     whatever is switched on, which fills in white. The near-black ground is for the glass
+     boxes, the help and what sits on a white fill */
   --color-fondo: #14110e;
   --color-panel: #1e1914;
-  --color-line: #ecdcc4;
-  --color-knob: #f89028;
-  --color-vivo: #ff5a36;
-  --color-activo: #8fd3f5;
-  /* Wide enough for the knobs to fit either side of the logo */
-  --breakpoint-hd: 90rem;
-  /* And wide enough for them to grow there */
-  --breakpoint-hd2: 110rem;
-}
-
-/* Height of the header, measured on it rendered: on a phone the sky starts right below it,
-   and the page takes it off the screen's height so the sky grows to fill the rest. If the
-   header's padding or the logo's size changes, measure it again. */
-:root {
-  --chrome: 7.25rem;
-}
-
-@media (min-width: 640px) {
-  :root {
-    --chrome: 9rem;
-  }
+  --color-line: #ffffff;
+  --color-knob: #ffffff;
+  --color-vivo: #ffffff;
+  --color-activo: #ffffff;
 }

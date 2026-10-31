@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, type ComponentProps, type PointerEvent, type ReactNode } from "react";
-import { flushSync } from "react-dom";
 import { KEYS, MODES, passed, touchDegree } from "@/lib/ambient";
 import { createEngine, type Channel, type Echo, type Engine, type Reverb, type Synth } from "./engine";
 import { Knob } from "./Knob";
@@ -29,12 +28,8 @@ const WAVES: { wave: OscillatorType; label: string; symbol: string }[] = [
 ];
 // Only the picture: chaos is how much the arc writhes
 const VISUAL = { chaos: 1, saturation: 1 };
-// How long nobody touches anything before the sky takes the whole screen
-const IDLE_MS = 20_000;
-// How long the full-screen sky takes to fade out, and back in in its place; duration-700 on the canvas
-const FADE_MS = 700;
-// How long the controls stay up over the full-screen sky after the last move
-const BAR_MS = 3000;
+// How long the controls stay over the sky after the last move
+const BAR_MS = 4000;
 const MIDI_KEY = "ambient-midi";
 const SECTIONS = ["Mixer", "Le Jazz", "Oscillator", "FX", "Cielo", "Output"];
 // Empty, recording the first pass, playing it round, or playing it while recording on top
@@ -44,9 +39,6 @@ const POWER = "M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0";
 const EXPAND = "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5";
 const SHRINK = "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5";
 const INFO = "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 8h.01M12 11v5";
-// The sky in its place, full screen after a while untouched, fading out of that, back in its place
-// still hidden, or full screen because it was asked for
-type View = "normal" | "idle" | "leaving" | "returning" | "full";
 const percent = (v: number) => `${Math.round(v * 100)}%`;
 const seconds = (v: number) => (v < 1 ? `${Math.round(v * 1000)}ms` : `${v.toFixed(1)}s`);
 const kHz = (v: number) => `${(v / 1000).toFixed(1)}k`;
@@ -73,14 +65,14 @@ export function Ambient() {
   const ripples = useRef<Ripple[]>([]);
   const lastDegree = useRef<number>(null);
   const [on, setOn] = useState(false);
-  const [view, setView] = useState<View>("normal");
   const [bar, setBar] = useState(true);
+  // Whether the browser's own bars are hidden too
+  const [fullscreen, setFullscreen] = useState(false);
+  const panel = useRef<HTMLDivElement>(null);
   const [midi, setMidi] = useState<"off" | "on" | "unavailable">("off");
   // Not assigning (false), assigning with no knob picked yet (null), or the knob waiting for a control
   const [learn, setLearn] = useState<string | null | false>(false);
-  // The one panel section showing its fine knobs, if any
-  const [fold, setFold] = useState<string | null>(null);
-  // On a phone the panel is a sheet over the sky showing one section at a time, and folds down to its tabs
+  // On a phone the controls are a sheet showing one section at a time, and fold down to its tabs
   const [tab, setTab] = useState("Mixer");
   const [sheet, setSheet] = useState(true);
   const access = useRef<MIDIAccess>(null);
@@ -100,7 +92,6 @@ export function Ambient() {
     layer: number;
     notes: { t: number; degree: number; brightness: number; layer: number; at?: number }[];
   }>({ start: 0, length: 0, layer: 0, notes: [] });
-  const manual = view === "full";
   const [levels, setLevels] = useState(LEVELS);
   const [echo, setEcho] = useState(ECHO);
   const [reverb, setReverb] = useState(REVERB);
@@ -116,79 +107,32 @@ export function Ambient() {
   }, [key, scale, levels, echo, reverb, master, synth]);
   useEffect(() => () => engine.current?.destroy(), []);
 
-  // While it plays, a while without a move, a tap or a key lets the sky fill the screen, morphed
-  // in with a view transition where there is one. Any of them fades it out, and it fades back in
-  // in its place. Reduced motion skips both.
+  // The sky always fills the window. The controls come up over it on any move, tap or key and
+  // fade after a while still, unless they are in use: pointed at, focused from the keyboard,
+  // assigning MIDI, or not playing yet, when they show where to start
   useEffect(() => {
-    if (!on || manual) return;
     let timer: ReturnType<typeof setTimeout>;
-    let current: View = "normal";
-    const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const show = (next: View) => {
-      current = next;
-      setView(next);
-    };
-    const settle = () => {
-      show("normal");
-      timer = setTimeout(() => {
-        const apply = () => flushSync(() => show("idle"));
-        // A hidden tab aborts the transition; the change still applies, so the rejection is no news
-        if (document.startViewTransition && !reduced()) document.startViewTransition(apply).ready.catch(() => {});
-        else apply();
-      }, IDLE_MS);
-    };
-    const wake = () => {
-      if (current === "normal") {
-        clearTimeout(timer);
-        return settle();
-      }
-      if (current !== "idle") return;
-      if (reduced()) return settle();
-      show("leaving");
-      // Back in its place still transparent, then a frame later fading in
-      timer = setTimeout(() => {
-        show("returning");
-        requestAnimationFrame(() => requestAnimationFrame(settle));
-      }, FADE_MS);
-    };
-    const events = ["pointermove", "pointerdown", "keydown", "wheel"] as const;
-    for (const e of events) addEventListener(e, wake);
-    settle();
-    return () => {
-      clearTimeout(timer);
-      for (const e of events) removeEventListener(e, wake);
-      // Turned off mid-fade, it would stay full screen and invisible
-      setView((v) => (v === "full" ? v : "normal"));
-    };
-  }, [on, manual]);
-
-  // Asked-for full screen: the controls show along the bottom on any move and hide after a while
-  // still; Escape, the exit button or the browser leaving full screen bring the sky back
-  useEffect(() => {
-    if (!manual) return;
-    let timer: ReturnType<typeof setTimeout>;
+    const busy = () => !on || learn !== false || !!panel.current?.matches(":hover, :has(:focus-visible)");
+    const rest = () => (busy() ? (timer = setTimeout(rest, BAR_MS)) : setBar(false));
     const wake = () => {
       setBar(true);
       clearTimeout(timer);
-      timer = setTimeout(() => setBar(false), BAR_MS);
+      timer = setTimeout(rest, BAR_MS);
     };
-    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && setView("normal");
-    const onChange = () => !document.fullscreenElement && setView("normal");
-    const events = ["pointermove", "pointerdown", "wheel"] as const;
+    const events = ["pointermove", "pointerdown", "keydown", "wheel"] as const;
     for (const e of events) addEventListener(e, wake);
-    addEventListener("keydown", wake);
-    addEventListener("keydown", onKey);
-    document.addEventListener("fullscreenchange", onChange);
     wake();
     return () => {
       clearTimeout(timer);
       for (const e of events) removeEventListener(e, wake);
-      removeEventListener("keydown", wake);
-      removeEventListener("keydown", onKey);
-      document.removeEventListener("fullscreenchange", onChange);
-      if (document.fullscreenElement) document.exitFullscreen();
     };
-  }, [manual]);
+  }, [on, learn]);
+
+  useEffect(() => {
+    const onChange = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
 
   // Every connected input, and any plugged in later, feeds the handler above
   useEffect(() => {
@@ -220,10 +164,10 @@ export function Ambient() {
     }
   }
 
-  function enterFull() {
-    // Hides the browser's own bars too where it can; an iPhone can't, and gets the sky over the page
-    document.documentElement.requestFullscreen?.().catch(() => {});
-    setView("full");
+  function toggleFullscreen() {
+    // Where the browser can; an iPhone can't, and keeps its bars
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen?.().catch(() => {});
   }
 
   // What the horizon reads each frame; a ref, so turning a knob doesn't restart the loop
@@ -402,8 +346,7 @@ export function Ambient() {
 
   const signed = (v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`;
 
-  // The main knobs: the mix and its sounds, then what colours them. Laid out beside the sky, and
-  // again small along the bottom of it when it fills the screen
+  // The main knobs: the mix and its sounds, then what colours them
   const sounds: ComponentProps<typeof Knob>[] = [
     { label: "Volume", value: master.volume, min: 0, max: 1, initial: MASTER.volume, onChange: (volume) => setMaster((s) => ({ ...s, volume })), format: percent },
     ...CHANNELS.map(({ channel, label }) => ({
@@ -430,7 +373,7 @@ export function Ambient() {
     { label: "Resonance", value: synth.resonance, min: 0.5, max: 15, initial: SYNTH.resonance, onChange: (resonance) => setSynth((s) => ({ ...s, resonance })), format: (v) => v.toFixed(1) },
   ];
   const waves = (
-    // Rounded keys like a sequencer's pads, in the hot orange, the chosen one in the sky's blue
+    // Rounded keys like a sequencer's pads, the chosen one filled
     <div role="radiogroup" aria-label="Onda" className="grid grid-cols-2 gap-1">
       {WAVES.map(({ wave, label, symbol }) => (
         <button
@@ -440,7 +383,7 @@ export function Ambient() {
           aria-label={label}
           title={label}
           onClick={() => setSynth((s) => ({ ...s, wave }))}
-          className="flex size-7 items-center justify-center rounded-md border border-vivo text-base leading-none text-vivo normal-case hover:opacity-80 aria-checked:border-activo aria-checked:text-activo hd:size-6 hd2:size-7"
+          className="flex size-7 items-center justify-center rounded-md border border-white/60 text-base leading-none normal-case hover:opacity-80 aria-checked:border-white aria-checked:bg-white aria-checked:text-fondo aria-checked:[text-shadow:none]"
         >
           {symbol}
         </button>
@@ -478,12 +421,11 @@ export function Ambient() {
     };
   });
 
-  // Shared by the controls beside the sky and the bar over it in full screen
   const tuning = (
     <>
       <label className="flex flex-col gap-1">
         Key
-        <select value={key} onChange={(e) => setKey(Number(e.target.value))} className="rounded-md border border-line/30 bg-fondo px-2 py-1 hd:px-1">
+        <select value={key} onChange={(e) => setKey(Number(e.target.value))} className="rounded-md border border-white/50 bg-black/25 px-2 py-1 [&>option]:bg-fondo">
           {KEYS.map((k, i) => (
             <option key={k} value={i}>
               {k}
@@ -493,7 +435,7 @@ export function Ambient() {
       </label>
       <label className="flex flex-col gap-1">
         Mode
-        <select value={mode} onChange={(e) => setMode(e.target.value)} className="rounded-md border border-line/30 bg-fondo px-2 py-1 hd:px-1">
+        <select value={mode} onChange={(e) => setMode(e.target.value)} className="rounded-md border border-white/50 bg-black/25 px-2 py-1 [&>option]:bg-fondo">
           {Object.keys(MODES).map((m) => (
             <option key={m}>{m}</option>
           ))}
@@ -505,17 +447,17 @@ export function Ambient() {
     <button
       onClick={connectMidi}
       aria-pressed={learn !== false}
-      className="rounded-md border-[1.5px] border-current px-2 py-1 hover:text-white aria-pressed:border-activo aria-pressed:bg-activo aria-pressed:text-fondo"
+      className="rounded-md border-[1.5px] border-current px-2 py-1 hover:text-white aria-pressed:border-activo aria-pressed:bg-activo aria-pressed:text-fondo aria-pressed:[text-shadow:none]"
     >
       {midi !== "on" ? "Conectar MIDI" : learn === false ? "Asignar MIDI" : "Hecho"}
     </button>
   );
 
-  // A section shows on a phone only while its tab is picked and the sheet is up
-  const onPhone = (title: string) => (sheet && tab === title ? "max-sm:w-full" : "max-sm:hidden");
+  // A section shows in the phone's sheet only while its tab is picked and the sheet is up
+  const onPhone = (title: string) => (sheet && tab === title ? "w-full" : "hidden");
 
-  const full = view === "idle" || view === "leaving" || manual;
-  const fading = view === "leaving" || view === "returning";
+  // Hidden controls fade out with the pointer, leaving the sky alone
+  const fade = `transition-opacity duration-700 motion-reduce:transition-none ${bar ? "" : "pointer-events-none opacity-0"}`;
 
   const byLabel = Object.fromEntries([...sounds, ...shades, ...extras, ...synthKnobs].map((knob) => [knob.label, knob]));
   const knob = (label: string, size?: "small" | "big") => <Knob key={label} {...learnable(byLabel[label])} small={size === "small"} big={size === "big"} />;
@@ -538,18 +480,11 @@ export function Ambient() {
   );
 
   return (
-    // A panel after the Minimoog's over the sky: sections left to right in the order the sound
-    // flows, each with its big knobs and a row of fine ones, in a rounded dark box
-    <div className="flex w-full flex-1 flex-col gap-4">
-      {/* The sky's box: in its place, or fixed over everything when full screen */}
-      <div
-        style={{ viewTransitionName: "cielo" }}
-        className={`transition-opacity duration-700 motion-reduce:transition-none ${fading ? "pointer-events-none opacity-0" : ""} ${
-          full
-            ? `fixed inset-0 z-50 h-svh w-screen bg-black ${manual && bar ? "" : "cursor-none"}`
-            : "relative aspect-[4/5] w-full min-w-0 overflow-hidden rounded-xl bg-white/5 max-sm:fixed max-sm:inset-x-0 max-sm:top-(--chrome) max-sm:bottom-0 max-sm:aspect-auto max-sm:rounded-none sm:aspect-[4/3] lg:aspect-auto lg:min-h-80 lg:flex-1"
-        }`}
-      >
+    // The sky fills the window, and over it, in white, the controls along the bottom, in sections
+    // after the Minimoog's in the order the sound flows
+    <>
+      {/* The sky, behind everything */}
+      <div className={`fixed inset-0 bg-black ${bar ? "" : "cursor-none"}`}>
         <canvas
           ref={canvas}
           tabIndex={0}
@@ -563,92 +498,16 @@ export function Ambient() {
         <p aria-live="polite" className="absolute top-3 left-3 font-mono text-xs text-white uppercase drop-shadow">
           {LOOPER_LABELS[looper]}
         </p>
-        {!full && (
-          <div className="absolute top-2 right-2 text-white drop-shadow">
-            <RoundButton bare label="Pantalla completa" path={EXPAND} onClick={enterFull} />
-          </div>
-        )}
-      </div>
-      {/* Over the sky the panel sits in a rounded dark box; from hd (globals.css) up it moves into the
-          logo's band, measured like globals.css's --chrome, each section's fine knobs dropping below it */}
-      <div className="order-first flex items-stretch overflow-hidden rounded-xl max-sm:fixed max-sm:inset-x-0 max-sm:bottom-0 max-sm:z-10 max-sm:rounded-b-none hd:absolute hd:inset-x-0 hd:-top-36 hd:h-36 hd:overflow-visible">
-        <div className="flex flex-1 flex-wrap justify-center gap-x-2 gap-y-4 rounded-2xl border border-line/30 bg-panel px-3 py-4 font-mono max-sm:max-h-[60svh] max-sm:flex-col max-sm:flex-nowrap max-sm:gap-y-3 max-sm:overflow-y-auto max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0 max-sm:bg-panel/95 max-sm:px-2 max-sm:pt-2 max-sm:pb-[max(1rem,env(safe-area-inset-bottom))] max-sm:backdrop-blur text-[9px] uppercase hd:grid hd:grid-cols-[1fr_19rem_1fr] hd:items-center hd:gap-x-9 hd2:gap-x-28 hd:border-0 hd:bg-transparent hd:px-8 hd:py-0 hd:text-[9px] hd2:text-[10px]">
-          {/* Only on a phone: a tab per section, the power button, and the fold */}
-          <div role="tablist" aria-label="Secciones" className="order-first flex items-center gap-1 sm:hidden">
-            <div className="flex flex-1 gap-1 overflow-x-auto">
-              {SECTIONS.map((title) => (
-                <button
-                  key={title}
-                  role="tab"
-                  aria-selected={sheet && tab === title}
-                  onClick={() => {
-                    setTab(title);
-                    setSheet(true);
-                  }}
-                  className="shrink-0 rounded-md px-2 py-1.5 font-bold tracking-[0.15em] text-line/60 uppercase aria-selected:bg-line/10 aria-selected:text-line"
-                >
-                  {title}
-                </button>
-              ))}
-            </div>
-            <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
-            <button onClick={() => setSheet(!sheet)} aria-expanded={sheet} aria-label={sheet ? "Plegar controles" : "Desplegar controles"} className="px-2 text-sm">
-              {sheet ? "▾" : "▴"}
-            </button>
-          </div>
-          <div className="contents hd:col-start-1 hd:ml-12 hd:flex hd:justify-self-end hd:divide-x hd:divide-line/15 hd:rounded-2xl hd:border hd:border-line/30 hd:bg-panel">
-            <Section title="Mixer" className={`order-3 hd:order-none ${onPhone("Mixer")}`}>
-              {CHANNELS.map(({ label }) => knob(label))}
-              {knob("Pitch")}
-            </Section>
-            <Section title="Le Jazz" className={`order-1 hd:order-none ${onPhone("Le Jazz")}`}>
-              {/* Side by side reads better, but beside the logo there's only room for that from hd2 */}
-              <div className="grid w-40 grid-cols-2 gap-2 hd:w-20 hd:grid-cols-1 hd:gap-1 hd2:w-40 hd2:grid-cols-2 hd2:gap-2">{tuning}</div>
-            </Section>
-          </div>
-          <div className="contents hd:col-start-3 hd:flex hd:justify-self-start hd:divide-x hd:divide-line/15 hd:rounded-2xl hd:border hd:border-line/30 hd:bg-panel">
-            <Section title="Oscillator" open={fold === "Oscillator"} onToggle={() => setFold(fold === "Oscillator" ? null : "Oscillator")} className={`order-2 hd:order-none ${onPhone("Oscillator")}`} fine={fine(["Attack", "Decay"])}>
-              <div className="w-16 self-center">{waves}</div>
-              {knob("Cutoff")}
-              {knob("Resonance")}
-            </Section>
-            <Section
-              title="FX"
-              open={fold === "FX"}
-              onToggle={() => setFold(fold === "FX" ? null : "FX")}
-              className={`order-4 hd:order-none ${onPhone("FX")}`}
-              fine={
-                <div className="flex flex-col items-center gap-2">
-                  <div className="flex gap-3">{fine(["Delay time", "Feedback", "Delay tone"])}</div>
-                  <div className="flex gap-3">{fine(["Size", "Reverb tone"])}</div>
-                </div>
-              }
-            >
-              {knob("Delay")}
-              {knob("Reverb")}
-            </Section>
-            <Section title="Cielo" open={fold === "Cielo"} onToggle={() => setFold(fold === "Cielo" ? null : "Cielo")} className={`order-5 hd:order-none ${onPhone("Cielo")}`} fine={fine(["Saturación"])}>
-              {knob("Luz")}
-              {knob("Caos")}
-            </Section>
-            <Section title="Output" open={fold === "Output"} onToggle={() => setFold(fold === "Output" ? null : "Output")} className={`order-6 hd:order-none ${onPhone("Output")}`} fine={midiControls}>
-              {knob("Volume", "big")}
-              <div className="flex flex-col items-center gap-2 self-center">
-                {/* On a phone the power button already sits in the tab bar */}
-                <div className="max-sm:hidden">
-                  <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
-                </div>
-                <RoundButton bare label="Cómo funciona" path={INFO} onClick={() => info.current?.showModal()} />
-              </div>
-            </Section>
-          </div>
+        <div className={`absolute top-2 right-2 text-white drop-shadow ${fade}`}>
+          <RoundButton bare label={fullscreen ? "Salir de pantalla completa" : "Pantalla completa"} path={fullscreen ? SHRINK : EXPAND} onClick={toggleFullscreen} />
         </div>
       </div>
-      {manual && (
-        // Every control, small and white along the bottom of the asked-for full-screen sky, in the
-        // panel's sections with their fine knobs out; wraps where it doesn't fit, hides while nothing moves
+      <h1 className="sr-only">Le Ciel</h1>
+      {/* The controls, to tell whether they are in use */}
+      <div ref={panel} className="contents">
+        {/* Every control, small along the bottom, each section with its fine knobs out; wraps where it doesn't fit */}
         <div
-          className={`fixed inset-x-0 bottom-0 z-[60] flex flex-wrap items-start justify-center gap-x-6 gap-y-3 bg-linear-to-t from-fondo/95 via-fondo/75 to-transparent px-4 pt-14 pb-4 font-mono text-[9px] text-white uppercase transition-opacity duration-700 motion-reduce:transition-none ${bar ? "" : "pointer-events-none opacity-0"}`}
+          className={`fixed inset-x-0 bottom-0 flex flex-wrap items-start justify-center gap-x-6 gap-y-3 bg-linear-to-t from-black/40 via-black/15 to-transparent px-4 pt-14 pb-4 font-mono text-[9px] text-white uppercase [text-shadow:0_1px_3px_rgb(0_0_0/0.45)] max-sm:hidden ${fade}`}
         >
           <Section title="Le Jazz" small>
             <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
@@ -669,20 +528,79 @@ export function Ambient() {
           <Section title="Output" small>
             {knob("Volume", "small")}
             <div className="flex flex-col items-center gap-2 self-center">
-              <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
-              {midiButton}
+              <div className="flex items-center gap-2">
+                <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
+                <RoundButton bare label="Cómo funciona" path={INFO} onClick={() => info.current?.showModal()} />
+              </div>
+              {midiControls}
             </div>
           </Section>
         </div>
-      )}
-      {manual && (
-        // In the corner, where the expand icon sat, and showing and hiding with the bar
-        <div
-          className={`fixed top-3 right-3 z-[60] text-white drop-shadow transition-opacity duration-700 motion-reduce:transition-none ${bar ? "" : "pointer-events-none opacity-0"}`}
-        >
-          <RoundButton bare label="Salir de pantalla completa" path={SHRINK} onClick={() => setView("normal")} />
+        {/* On a phone, a sheet along the bottom showing one section at a time */}
+        <div className={`fixed inset-x-0 bottom-0 z-10 sm:hidden ${fade}`}>
+          <div className="flex max-h-[60svh] flex-col gap-y-3 overflow-y-auto rounded-t-2xl bg-black/45 px-2 pt-2 pb-[max(1rem,env(safe-area-inset-bottom))] font-mono text-[9px] text-white uppercase backdrop-blur-md [text-shadow:0_1px_3px_rgb(0_0_0/0.45)]">
+            {/* A tab per section, the power button, and the fold */}
+            <div role="tablist" aria-label="Secciones" className="flex items-center gap-1">
+              <div className="flex flex-1 gap-1 overflow-x-auto">
+                {SECTIONS.map((title) => (
+                  <button
+                    key={title}
+                    role="tab"
+                    aria-selected={sheet && tab === title}
+                    onClick={() => {
+                      setTab(title);
+                      setSheet(true);
+                    }}
+                    className="shrink-0 rounded-md px-2 py-1.5 font-bold tracking-[0.15em] text-line/60 uppercase aria-selected:bg-line/10 aria-selected:text-line"
+                  >
+                    {title}
+                  </button>
+                ))}
+              </div>
+              <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
+              <button onClick={() => setSheet(!sheet)} aria-expanded={sheet} aria-label={sheet ? "Plegar controles" : "Desplegar controles"} className="px-2 text-sm">
+                {sheet ? "▾" : "▴"}
+              </button>
+            </div>
+            <Section title="Le Jazz" className={onPhone("Le Jazz")}>
+              <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
+            </Section>
+            <Section title="Oscillator" className={onPhone("Oscillator")} fine={fine(["Attack", "Decay"])}>
+              <div className="w-16 self-center">{waves}</div>
+              {knob("Cutoff")}
+              {knob("Resonance")}
+            </Section>
+            <Section title="Mixer" className={onPhone("Mixer")}>
+              {CHANNELS.map(({ label }) => knob(label))}
+              {knob("Pitch")}
+            </Section>
+            <Section
+              title="FX"
+              className={onPhone("FX")}
+              fine={
+                <div className="flex flex-col items-center gap-2">
+                  <div className="flex gap-3">{fine(["Delay time", "Feedback", "Delay tone"])}</div>
+                  <div className="flex gap-3">{fine(["Size", "Reverb tone"])}</div>
+                </div>
+              }
+            >
+              {knob("Delay")}
+              {knob("Reverb")}
+            </Section>
+            <Section title="Cielo" className={onPhone("Cielo")} fine={fine(["Saturación"])}>
+              {knob("Luz")}
+              {knob("Caos")}
+            </Section>
+            <Section title="Output" className={onPhone("Output")} fine={midiControls}>
+              {knob("Volume", "big")}
+              {/* The power button already sits in the tab bar */}
+              <div className="self-center">
+                <RoundButton bare label="Cómo funciona" path={INFO} onClick={() => info.current?.showModal()} />
+              </div>
+            </Section>
+          </div>
         </div>
-      )}
+      </div>
       {/* A click on the backdrop closes it too; the padding lives inside, so a click there doesn't */}
       <dialog
         ref={info}
@@ -714,7 +632,7 @@ export function Ambient() {
               <strong>Por MIDI</strong>, conecta un teclado o un controlador desde la sección Output (en Chrome, Edge o Firefox). Los knobs de un Akai MPK mini funcionan sin configurar nada, y con Asignar MIDI enlazas cualquier mando a cualquier knob.
             </li>
             <li>
-              <strong>Pantalla completa</strong> con el icono de la esquina. Si no tocas nada en un rato, el cielo se queda solo.
+              <strong>Los controles se esconden</strong> si no tocas nada en un rato, y el cielo se queda solo; vuelven al mover el ratón o tocar la pantalla. Con el icono de la esquina, pantalla completa.
             </li>
           </ul>
           <button onClick={() => info.current?.close()} className="mt-6 border border-current px-3 py-1 font-mono uppercase hover:text-white">
@@ -722,7 +640,7 @@ export function Ambient() {
           </button>
         </div>
       </dialog>
-    </div>
+    </>
   );
 }
 
@@ -743,30 +661,17 @@ function RoundButton({ label, path, pressed, bare, onClick }: { label: string; p
   );
 }
 
-// One section of the panel, its title printed over it like the Minimoog's: the big knobs, then the fine ones
-// A section with fine knobs folds them away behind a triangle by its title, one open at a time:
-// open, they sit under its big knobs over the sky, or drop below it beside the logo, where there's no room
-// small: the full-screen bar's, with a smaller title
-type SectionProps = { title: string; fine?: ReactNode; open?: boolean; onToggle?(): void; small?: boolean; className?: string; children: ReactNode };
+// One section of the controls, its title printed over it like the Minimoog's: the big knobs, then the fine ones
+// small: the bottom strip's, everything in fine knobs and its title showing; otherwise the phone's sheet's,
+// where the tabs name it
+type SectionProps = { title: string; fine?: ReactNode; small?: boolean; className?: string; children: ReactNode };
 
-function Section({ title, fine, open, onToggle, small, className, children }: SectionProps) {
+function Section({ title, fine, small, className, children }: SectionProps) {
   return (
-    // Its small bold title at the top left, as printed on a hardware panel; the panel draws the boxes
-    <section aria-label={title} className={`relative flex min-w-0 flex-col gap-2.5 ${small ? "" : "px-3 py-2 hd:px-1.5 hd:py-1.5 hd2:px-2.5"} ${className ?? ""}`}>
-      <h2 className={`flex items-center gap-1 font-mono text-[10px] font-bold tracking-[0.15em] text-line/80 ${small ? "" : "max-sm:sr-only"}`}>
-        <span aria-hidden>{title}</span>
-        {fine && (
-          <button onClick={onToggle} aria-expanded={open} aria-label={`Más controles de ${title}`} className="px-1 text-vivo hover:text-white max-sm:hidden">
-            {open ? "▾" : "▸"}
-          </button>
-        )}
-      </h2>
-      <div className={`flex items-start justify-center ${small ? "gap-3" : "gap-4 hd:gap-2.5 hd2:gap-3"}`}>{children}</div>
-      {fine && (
-        <div className={`flex items-start justify-center gap-4 pt-2 ${open ? "" : "hidden max-sm:flex"} hd:absolute hd:top-full hd:left-1/2 hd:z-20 hd:mt-2 hd:w-max hd:-translate-x-1/2 hd:rounded-xl hd:border hd:border-line/30 hd:bg-panel hd:p-3 hd:pt-4`}>
-          {fine}
-        </div>
-      )}
+    <section aria-label={title} className={`relative flex min-w-0 flex-col gap-2.5 ${small ? "" : "px-3 py-2"} ${className ?? ""}`}>
+      <h2 className={`font-mono text-[10px] font-bold tracking-[0.15em] text-line/80 ${small ? "" : "sr-only"}`}>{title}</h2>
+      <div className={`flex items-start justify-center ${small ? "gap-3" : "gap-4"}`}>{children}</div>
+      {fine && <div className="flex items-start justify-center gap-4 pt-2">{fine}</div>}
     </section>
   );
 }
