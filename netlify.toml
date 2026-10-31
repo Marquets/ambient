@@ -1,0 +1,11 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+# El sitio venia de despliegues manuales, donde la deteccion automatica de
+# framework no se dispara: sin el runtime, Netlify publica .next como ficheros
+# estaticos y la raiz da 404 porque el App Router no genera index.html.
+# Declararlo lo fuerza. El runtime genera por su cuenta los redirects de
+# /_next/image y traduce images.remotePatterns de next.config.ts.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
