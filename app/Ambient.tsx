@@ -7,15 +7,16 @@ import { Fader } from "./Fader";
 import { Knob } from "./Knob";
 import { DEFAULT_BINDINGS, noteDegree } from "./midi";
 import { randomPreset } from "./preset";
-import { MAX_STARS, skyColors, startSky } from "./sky";
+import { startPond } from "./pond";
+import { MAX_STARS, SCENES, skyColors, startSky, type Scene } from "./sky";
 
 const CHANNELS: { channel: Channel; label: string }[] = [
   { channel: "pad", label: "Pad" },
   { channel: "drone", label: "Drone" },
-  { channel: "lluvia", label: "Lluvia" },
+  { channel: "lluvia", label: "Rain" },
   // The notes that fall by themselves, and the ones played by hand or by MIDI
-  { channel: "notas", label: "Azar" },
-  { channel: "lienzo", label: "Tus notas" },
+  { channel: "notas", label: "Random" },
+  { channel: "lienzo", label: "Keys" },
 ];
 const LEVELS: Record<Channel, number> = { pad: 0.6, drone: 0.4, lluvia: 0.15, notas: 0.5, lienzo: 0.6 };
 const ECHO: Echo = { amount: 0.3, time: 0.6, repeats: 0.45, color: 2500 };
@@ -32,6 +33,18 @@ const WAVES: { wave: OscillatorType; label: string; symbol: string }[] = [
 ];
 // Only the picture: chaos is how much the arc writhes
 const VISUAL = { chaos: 1 };
+// Where each note's letter sits in KEYS, for Shift and a letter changing key
+const NATURALS: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+// How far round the colour wheel each mode turns the flower from its own green, after the colours
+// its sky has: turquoise, violet, amber, pink
+const FLOWER_HUES: Record<string, number> = { Dorian: 0, Lydian: 40, Aeolian: 120, Mixolydian: -110, Pentatonic: 180 };
+// The flower's endless zoom: how many copies nest inside each other, from the longest delay time to
+// the shortest, each this many times smaller than the one around it, how many copies a second it
+// falls through with the feedback all the way up, and how far up the delay has to come for the zoom
+// to take over completely
+const ZOOM = { copies: [2, 8], ratio: 2.6, speed: 0.12, full: 0.4 };
+// How fast the flower turns about its centre, in radians a second: a full turn in about five minutes
+const FLOWER_TURN = 0.02;
 // How long the controls stay over the sky after the last move
 const BAR_MS = 10_000;
 const MIDI_KEY = "ambient-midi";
@@ -40,7 +53,7 @@ const SECTIONS = ["Mixer", "Oscillator", "Le Jazz", "Tape", "FX", "Ciel", "Outpu
 const OUTPUTS = ["Volume", "Reverb", "Delay"];
 // Empty, recording the first pass, playing it round, or playing it while recording on top
 type Looper = "empty" | "recording" | "playing" | "overdub";
-const LOOPER_LABELS: Record<Looper, string> = { empty: "", recording: "● Rec", playing: "⟳ Loop", overdub: "● Encima" };
+const LOOPER_LABELS: Record<Looper, string> = { empty: "", recording: "● Rec", playing: "⟳ Loop", overdub: "● Overdub" };
 const POWER = "M12 3v9M6.3 6.3a8 8 0 1 0 11.4 0";
 const EXPAND = "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5";
 const SHRINK = "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5";
@@ -49,9 +62,9 @@ const percent = (v: number) => `${Math.round(v * 100)}%`;
 const seconds = (v: number) => (v < 1 ? `${Math.round(v * 1000)}ms` : `${v.toFixed(1)}s`);
 const kHz = (v: number) => `${(v / 1000).toFixed(1)}k`;
 
-type Settings = { key: number; scale: number[]; levels: typeof LEVELS; echo: Echo; reverb: Reverb; master: typeof MASTER; synth: Synth; tape: Tape };
+type Settings = { key: number; scale: number[]; levels: typeof LEVELS; echo: Echo; reverb: Reverb; master: typeof MASTER; synth: Synth; tape: Tape; scene: Scene };
 
-function sync(e: Engine, { key, scale, levels, echo, reverb, master, synth, tape }: Settings) {
+function sync(e: Engine, { key, scale, levels, echo, reverb, master, synth, tape, scene }: Settings) {
   e.setKey(key, scale);
   for (const { channel } of CHANNELS) e.setLevel(channel, levels[channel]);
   e.setEcho(echo);
@@ -61,6 +74,7 @@ function sync(e: Engine, { key, scale, levels, echo, reverb, master, synth, tape
   e.setPitch(master.pitch);
   e.setSynth(synth);
   e.setTape(tape);
+  e.setScene(scene);
 }
 
 // A note's star, kept as a degree so one set off with an older scale still lands in a column
@@ -69,6 +83,7 @@ type Ripple = { degree: number; y: number; at: number };
 export function Ambient() {
   const engine = useRef<Engine>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const film = useRef<HTMLVideoElement>(null);
   const ripples = useRef<Ripple[]>([]);
   const lastDegree = useRef<number>(null);
   const [on, setOn] = useState(false);
@@ -104,10 +119,11 @@ export function Ambient() {
   const [reverb, setReverb] = useState(REVERB);
   const [master, setMaster] = useState(MASTER);
   const [visual, setVisual] = useState(VISUAL);
+  const [scene, setScene] = useState<Scene>("Sky");
   const [synth, setSynth] = useState(SYNTH);
   const [tape, setTape] = useState(TAPE);
   const [key, setKey] = useState(9);
-  const [mode, setMode] = useState("Dórico");
+  const [mode, setMode] = useState("Dorian");
   const scale = MODES[mode];
 
   // Every visit opens on a different sky and sound. Drawn after hydrating, since the server can't
@@ -125,12 +141,13 @@ export function Ambient() {
     setTape(p.tape);
     setMaster((s) => ({ ...s, light: p.light }));
     setVisual({ chaos: p.chaos });
+    setScene(p.scene);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
   useEffect(() => {
-    if (engine.current) sync(engine.current, { key, scale, levels, echo, reverb, master, synth, tape });
-  }, [key, scale, levels, echo, reverb, master, synth, tape]);
+    if (engine.current) sync(engine.current, { key, scale, levels, echo, reverb, master, synth, tape, scene });
+  }, [key, scale, levels, echo, reverb, master, synth, tape, scene]);
   useEffect(() => () => engine.current?.destroy(), []);
 
   // The sky always fills the window. The controls come up over it on any move, tap or key and
@@ -203,17 +220,20 @@ export function Ambient() {
   }, [levels, echo, reverb, master, visual, mode]);
 
   // The sky follows the sound: the drone is the wind, the mode picks its colours and the light runs
-  // them from night through dawn and day to sunset, the pad and how loud it plays thicken the
-  // clouds, pitch warms or cools them, the reverb's size softens them, chaos makes them writhe and
-  // lluvia rains from them. Every note you play lights the cloud where you touched from within and
-  // parts it, pulsed again by the eco and spread by the reverb. Reduced motion holds the sky still.
+  // them from night, when the stars come out, through dawn and day to sunset, the pad and how loud
+  // it plays thicken the clouds, pitch warms or cools them, the reverb's size softens them, chaos
+  // makes them writhe and lluvia rains from them. Every note you play lights the cloud where you
+  // touched from within and parts it, pulsed again by the eco and spread by the reverb. Reduced
+  // motion holds the sky still.
   useEffect(() => {
     const reduced = matchMedia("(prefers-reduced-motion: reduce)");
     const stars = new Float32Array(MAX_STARS * 4);
     let time = 0;
     let pulse = 0;
     let last = performance.now();
-    return startSky(canvas.current!, () => {
+    // When the last frame was drawn, to tell which notes and echoes fell since: the pond drops them in
+    let drawn = last;
+    const frame = () => {
       const { levels, echo, reverb, master, visual, mode } = look.current;
       const now = performance.now();
       const still = reduced.matches;
@@ -228,15 +248,20 @@ export function Ambient() {
       ripples.current = ripples.current.filter((r) => now - r.at < linger + echoes * echoMs);
       stars.fill(1);
       let n = 0;
+      const drops: [number, number, number][] = [];
       // A MIDI note can land past the canvas's two octaves; it wraps back into them
       const columns = 2 * scale.length;
       for (const r of ripples.current) {
         for (let k = 0; k <= echoes && n < MAX_STARS; k++) {
           const age = now - r.at - k * echoMs;
           if (age < 0 || age > linger) continue;
-          stars.set([((((r.degree % columns) + columns) % columns) + 0.5) / columns, 1 - r.y, age / linger, k === 0 ? 1 : Math.min(1, echo.repeats ** k * echo.amount * 2)], n++ * 4);
+          const x = ((((r.degree % columns) + columns) % columns) + 0.5) / columns;
+          const strength = k === 0 ? 1 : Math.min(1, echo.repeats ** k * echo.amount * 2);
+          stars.set([x, 1 - r.y, age / linger, strength], n++ * 4);
+          if (age <= now - drawn) drops.push([x, 1 - r.y, strength]);
         }
       }
+      drawn = now;
 
       return {
         time,
@@ -248,17 +273,111 @@ export function Ambient() {
         warp: visual.chaos,
         width: 0.4 + (reverb.size / 10) * 1.2,
         pulse,
+        light: master.light,
         stars,
+        drops,
+        mode,
+        still,
       };
-    });
-  }, [scale.length]);
+    };
+    // The flower falls into itself forever, the delay's repeats made visible: the film painted over
+    // and over, each copy nested inside the one around it, all growing, the biggest fading out as it
+    // leaves the screen while a new one fades in at the centre. Only the delay moves it, as if each
+    // copy were a repeat: with none the flower just sits there, and the more comes back the more the
+    // zoom takes over; the delay time is how many copies there are, more for shorter repeats; the
+    // feedback how fast it falls, and how much of itself each copy keeps, the way each repeat of a
+    // delay comes back quieter. It turns slowly about its centre.
+    // The mode colours it, a low pitch warms it and a high one cools it, and left alone its colour
+    // drifts slowly; the light dims it. Notes only sound here. Reduced motion holds it still, on the film's first frame.
+    if (scene === "Flower") {
+      const box = canvas.current!;
+      const paint = box.getContext("2d")!;
+      const source = film.current!;
+      if (reduced.matches) source.pause();
+      let raf = 0;
+      let hue = FLOWER_HUES[look.current.mode] ?? 0;
+      let depth = 0;
+      let angle = 0;
+      let then = performance.now();
+      const tick = (now: number) => {
+        raf = requestAnimationFrame(tick);
+        // Kept running for the pulse, and so notes still age away while nothing draws them
+        frame();
+        const f = look.current;
+        const dt = Math.min((now - then) / 1000, 0.1);
+        then = now;
+        const drift = reduced.matches ? 0 : Math.sin(now / 20_000) * 20;
+        hue += ((FLOWER_HUES[f.mode] ?? 0) - f.master.pitch * 3 + drift - hue) * 0.03;
+        const day = Math.min(1, f.master.light / 0.45);
+        box.style.filter = `hue-rotate(${hue}deg) saturate(1.2) brightness(${(0.25 + 0.75 * day) * (1 + pulse * 0.3)})`;
+        if (!reduced.matches) {
+          depth += dt * ZOOM.speed * Math.min(1, f.echo.amount / ZOOM.full) * (0.15 + 1.85 * Math.min(1, f.echo.repeats / 0.9));
+          angle += dt * FLOWER_TURN;
+        }
+
+        // Capped at 2x, like the other scenes
+        const dpr = Math.min(devicePixelRatio, 2);
+        const w = Math.round(box.clientWidth * dpr);
+        const h = Math.round(box.clientHeight * dpr);
+        if (box.width !== w || box.height !== h) [box.width, box.height] = [w, h];
+        paint.globalCompositeOperation = "source-over";
+        paint.globalAlpha = 1;
+        paint.fillStyle = "#000";
+        paint.fillRect(0, 0, w, h);
+        if (source.readyState < 2) return;
+        // Screened, so each copy's black lets the others through
+        paint.globalCompositeOperation = "screen";
+        const draw = (scale: number, alpha: number) => {
+          if (alpha <= 0.001) return;
+          paint.globalAlpha = alpha;
+          const sw = source.videoWidth * scale;
+          const sh = source.videoHeight * scale;
+          paint.drawImage(source, -sw / 2, -sh / 2, sw, sh);
+        };
+        // Turned about the centre at its own size: the film's ground is black, so the corners it
+        // leaves as it turns melt into what's behind
+        const cover = Math.max(w / source.videoWidth, h / source.videoHeight);
+        paint.setTransform(1, 0, 0, 1, w / 2, h / 2);
+        paint.rotate(angle);
+        const wet = Math.min(1, f.echo.amount / ZOOM.full);
+        // The flower as it is, giving way to the zoom as the delay comes up
+        draw(cover, 1 - wet);
+        // How many copies the delay time makes, not rounded, so turning it fades the innermost in or out
+        const short = 1 - (f.echo.time - 0.05) / 1.45;
+        const copies = ZOOM.copies[0] + short * (ZOOM.copies[1] - ZOOM.copies[0]);
+        // How much of itself each copy keeps from the one round it
+        const keep = 0.35 + 0.65 * Math.min(1, f.echo.repeats / 0.9);
+        const phase = depth % 1;
+        for (let k = 0; k <= Math.ceil(copies); k++) {
+          // How big this copy is, as a power of the ratio: past 1 it's leaving the screen and fades out,
+          // and the innermost fades in as it grows
+          const size = 1 + phase - k;
+          const leaving = Math.min(1, 2 - size);
+          const arriving = Math.min(1, Math.max(0, size - (1 - copies)));
+          draw(cover * ZOOM.ratio ** size, wet * leaving * arriving * keep ** Math.max(0, k - 1));
+        }
+        paint.setTransform(1, 0, 0, 1, 0, 0);
+      };
+      raf = requestAnimationFrame(tick);
+      return () => {
+        cancelAnimationFrame(raf);
+        box.style.filter = "";
+      };
+    }
+    // Without WebGL2 the pond can't run, and the sky stands in for it
+    if (scene === "Pond") {
+      const stop = startPond(canvas.current!, frame);
+      if (stop) return stop;
+    }
+    return startSky(canvas.current!, frame);
+  }, [scale.length, scene]);
 
   function start() {
     // iOS keeps Web Audio silent with the ringer switch off unless the page asks to play like media
     const session = (navigator as { audioSession?: { type: string } }).audioSession;
     if (session) session.type = "playback";
     // Synced here too, not left to the effect: a first tap on the canvas plays its note straight away
-    if (!engine.current) sync((engine.current = createEngine()), { key, scale, levels, echo, reverb, master, synth, tape });
+    if (!engine.current) sync((engine.current = createEngine()), { key, scale, levels, echo, reverb, master, synth, tape, scene });
     engine.current.resume();
     setOn(true);
   }
@@ -354,6 +473,13 @@ export function Ambient() {
         return undo();
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Shift and a note's letter changes key, pad and drone sliding over; the same letter again
+      // goes up to the sharp between it and the next, where there is one
+      const natural = e.shiftKey ? NATURALS[e.key.toUpperCase()] : undefined;
+      if (natural !== undefined) {
+        const between = (natural + 1) % 12;
+        return setKey(key === natural && !(Object.values(NATURALS) as number[]).includes(between) ? between : natural);
+      }
       const shift = { z: -1, x: 1 }[e.key.toLowerCase()];
       if (shift) octave.current = Math.min(2, Math.max(-2, octave.current + shift));
       const n = "1234567890".indexOf(e.key);
@@ -386,7 +512,7 @@ export function Ambient() {
   ];
   const shades: ComponentProps<typeof Knob>[] = [
     // Turned all the way down is darkness
-    { label: "Luz", value: master.light, min: 0, max: 1, initial: MASTER.light, onChange: (light) => setMaster((s) => ({ ...s, light })), format: percent },
+    { label: "Light", value: master.light, min: 0, max: 1, initial: MASTER.light, onChange: (light) => setMaster((s) => ({ ...s, light })), format: percent },
     { label: "Pitch", value: master.pitch, min: -12, max: 12, initial: MASTER.pitch, onChange: (pitch) => setMaster((s) => ({ ...s, pitch })), format: signed },
     { label: "Delay", value: echo.amount, min: 0, max: 1, initial: ECHO.amount, onChange: (amount) => setEcho((s) => ({ ...s, amount })), format: percent },
     { label: "Reverb", value: reverb.amount, min: 0, max: 1, initial: REVERB.amount, onChange: (amount) => setReverb((s) => ({ ...s, amount })), format: percent },
@@ -399,7 +525,7 @@ export function Ambient() {
   ];
   const waves = (
     // Rounded keys like a sequencer's pads, the chosen one filled
-    <div role="radiogroup" aria-label="Onda" className="grid grid-cols-2 gap-1">
+    <div role="radiogroup" aria-label="Wave" className="grid grid-cols-2 gap-1">
       {WAVES.map(({ wave, label, symbol }) => (
         <button
           key={wave}
@@ -421,10 +547,10 @@ export function Ambient() {
     { label: "Delay tone", value: echo.color, min: 400, max: 8000, initial: ECHO.color, onChange: (color) => setEcho((s) => ({ ...s, color })), format: kHz },
     { label: "Size", value: reverb.size, min: 1, max: 10, initial: REVERB.size, onChange: (size) => setReverb((s) => ({ ...s, size })), format: (v) => `${v.toFixed(1)}s` },
     { label: "Reverb tone", value: reverb.color, min: 400, max: 12000, initial: REVERB.color, onChange: (color) => setReverb((s) => ({ ...s, color })), format: kHz },
-    { label: "Caos", value: visual.chaos, min: 0, max: 4, initial: VISUAL.chaos, onChange: (chaos) => setVisual((s) => ({ ...s, chaos })), format: (v) => v.toFixed(1) },
+    { label: "Chaos", value: visual.chaos, min: 0, max: 4, initial: VISUAL.chaos, onChange: (chaos) => setVisual((s) => ({ ...s, chaos })), format: (v) => v.toFixed(1) },
   ];
   const tapeKnobs: ComponentProps<typeof Knob>[] = [
-    { label: "Saturación", value: tape.saturation, min: 0, max: 1, initial: TAPE.saturation, onChange: (saturation) => setTape((s) => ({ ...s, saturation })), format: percent },
+    { label: "Saturation", value: tape.saturation, min: 0, max: 1, initial: TAPE.saturation, onChange: (saturation) => setTape((s) => ({ ...s, saturation })), format: percent },
     { label: "Wow", value: tape.wow, min: 0, max: 1, initial: TAPE.wow, onChange: (wow) => setTape((s) => ({ ...s, wow })), format: percent },
     { label: "Flutter", value: tape.flutter, min: 0, max: 1, initial: TAPE.flutter, onChange: (flutter) => setTape((s) => ({ ...s, flutter })), format: percent },
   ];
@@ -472,13 +598,24 @@ export function Ambient() {
       </label>
     </>
   );
+  // Which picture the sound draws, shared by the strip and the phone's sheet
+  const scenePicker = (
+    <label className="flex flex-col gap-1">
+      Scene
+      <select value={scene} onChange={(e) => setScene(e.target.value as Scene)} className="rounded-md border border-white/50 bg-black/25 px-2 py-1 [&>option]:bg-fondo">
+        {SCENES.map((s) => (
+          <option key={s}>{s}</option>
+        ))}
+      </select>
+    </label>
+  );
   const midiButton = (
     <button
       onClick={connectMidi}
       aria-pressed={learn !== false}
       className="rounded-md border-[1.5px] border-current px-2 py-1 hover:text-white aria-pressed:border-activo aria-pressed:bg-activo aria-pressed:text-fondo aria-pressed:[text-shadow:none]"
     >
-      {midi !== "on" ? "Conectar MIDI" : learn === false ? "Asignar MIDI" : "Hecho"}
+      {midi !== "on" ? "Connect MIDI" : learn === false ? "Assign MIDI" : "Done"}
     </button>
   );
 
@@ -499,13 +636,13 @@ export function Ambient() {
       {midiButton}
       <p className="max-w-40 text-center normal-case" aria-live="polite">
         {midi === "unavailable"
-          ? "Este navegador no tiene MIDI; prueba con Chrome"
+          ? "This browser has no MIDI; try Chrome"
           : learn === null
-            ? "Pulsa un knob y mueve un mando del controlador"
+            ? "Click a knob, then move a control on your controller"
             : learn
-              ? `Mueve un mando para ${learn}`
+              ? `Move a control for ${learn}`
               : midi === "on"
-                ? "Teclado y knobs conectados"
+                ? "Keyboard and knobs connected"
                 : ""}
       </p>
     </div>
@@ -517,21 +654,39 @@ export function Ambient() {
     <>
       {/* The sky, behind everything */}
       <div className={`fixed inset-0 bg-black ${bar ? "" : "cursor-none"}`}>
+        {/* A new canvas for each scene: the sky draws with WebGL, the pond with WebGL2 and the flower
+            with plain 2D, and a canvas only ever gives one of them */}
         <canvas
+          key={scene}
           ref={canvas}
           tabIndex={0}
           role="application"
-          aria-label="Cielo: toca o arrastra para soltar notas, más agudas a la derecha y más brillantes arriba. Con el teclado, las teclas del 1 al 0 en cualquier parte de la página."
+          aria-label="Sky: tap or drag to drop notes, higher to the right and brighter towards the top. On the keyboard, keys 1 to 0 anywhere on the page."
           onPointerDown={onPointer}
           onPointerMove={onPointer}
           onPointerUp={() => (lastDegree.current = null)}
           className="absolute inset-0 block size-full touch-none -outline-offset-4 focus-visible:outline-2 focus-visible:outline-accent"
         />
+        {/* "ascii flower", made with the 21st.dev ASCII editor and baked to a looping video: kept
+            playing but out of sight, for the canvas to paint from */}
+        {scene === "Flower" && (
+          <video
+            ref={film}
+            src="https://assets.21st.dev/ascii-recipes/videos/user_303XMtoirrQlWWGb8KnV7WJoQOZ/fc9d5504-d38b-4561-8b1b-2dbaec1e9a6e.mp4"
+            poster="https://assets.21st.dev/ascii-recipes/thumbnails/user_303XMtoirrQlWWGb8KnV7WJoQOZ/7fa35d6b-864c-403a-ac1c-31366c7f0ace.webp"
+            autoPlay
+            loop
+            muted
+            playsInline
+            aria-hidden
+            className="pointer-events-none absolute top-0 left-0 size-px opacity-0"
+          />
+        )}
         <p aria-live="polite" className="absolute top-3 left-3 font-mono text-xs text-white uppercase drop-shadow">
           {LOOPER_LABELS[looper]}
         </p>
         <div className={`absolute top-2 right-2 text-white drop-shadow ${fade}`}>
-          <RoundButton bare label={fullscreen ? "Salir de pantalla completa" : "Pantalla completa"} path={fullscreen ? SHRINK : EXPAND} onClick={toggleFullscreen} />
+          <RoundButton bare label={fullscreen ? "Exit full screen" : "Full screen"} path={fullscreen ? SHRINK : EXPAND} onClick={toggleFullscreen} />
         </div>
       </div>
       <h1 className="sr-only">Le Ciel</h1>
@@ -556,21 +711,22 @@ export function Ambient() {
             </Section>
           </div>
           <Section title="Tape" small>
-            {fine(["Saturación", "Wow", "Flutter", "Pitch"])}
+            {fine(["Saturation", "Wow", "Flutter", "Pitch"])}
           </Section>
           <Section title="FX" small>
             {fine(["Delay time", "Feedback", "Delay tone", "Size", "Reverb tone"])}
           </Section>
           <Section title="Ciel" small>
-            {fine(["Luz", "Caos"])}
+            {scenePicker}
+            {fine(["Light", "Chaos"])}
           </Section>
           {/* The master and the two effect returns, like a desk's */}
           <Section title="Output" small>
             {OUTPUTS.map((label) => fader(label))}
             <div className="flex flex-col items-center gap-2 self-center">
               <div className="flex items-center gap-2">
-                <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
-                <RoundButton bare label="Cómo funciona" path={INFO} onClick={() => info.current?.showModal()} />
+                <RoundButton label={on ? "Switch off" : "Switch on"} path={POWER} pressed={on} onClick={toggle} />
+                <RoundButton bare label="How it works" path={INFO} onClick={() => info.current?.showModal()} />
               </div>
               {midiControls}
             </div>
@@ -580,7 +736,7 @@ export function Ambient() {
         <div className={`fixed inset-x-0 bottom-0 z-10 sm:hidden ${fade}`}>
           <div className="flex max-h-[60svh] flex-col gap-y-3 overflow-y-auto rounded-t-2xl bg-black/45 px-2 pt-2 pb-[max(1rem,env(safe-area-inset-bottom))] font-mono text-[9px] text-white uppercase backdrop-blur-md [text-shadow:0_1px_3px_rgb(0_0_0/0.45)]">
             {/* A tab per section, the power button, and the fold */}
-            <div role="tablist" aria-label="Secciones" className="flex items-center gap-1">
+            <div role="tablist" aria-label="Sections" className="flex items-center gap-1">
               <div className="flex flex-1 gap-1 overflow-x-auto">
                 {SECTIONS.map((title) => (
                   <button
@@ -597,8 +753,8 @@ export function Ambient() {
                   </button>
                 ))}
               </div>
-              <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
-              <button onClick={() => setSheet(!sheet)} aria-expanded={sheet} aria-label={sheet ? "Plegar controles" : "Desplegar controles"} className="px-2 text-sm">
+              <RoundButton label={on ? "Switch off" : "Switch on"} path={POWER} pressed={on} onClick={toggle} />
+              <button onClick={() => setSheet(!sheet)} aria-expanded={sheet} aria-label={sheet ? "Fold controls" : "Unfold controls"} className="px-2 text-sm">
                 {sheet ? "▾" : "▴"}
               </button>
             </div>
@@ -614,20 +770,21 @@ export function Ambient() {
               <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
             </Section>
             <Section title="Tape" className={onPhone("Tape")}>
-              {["Saturación", "Wow", "Flutter", "Pitch"].map((label) => knob(label))}
+              {["Saturation", "Wow", "Flutter", "Pitch"].map((label) => knob(label))}
             </Section>
             <Section title="FX" className={onPhone("FX")} fine={<div className="flex gap-4">{["Size", "Reverb tone"].map((label) => knob(label))}</div>}>
               {["Delay time", "Feedback", "Delay tone"].map((label) => knob(label))}
             </Section>
             <Section title="Ciel" className={onPhone("Ciel")}>
-              {knob("Luz")}
-              {knob("Caos")}
+              {scenePicker}
+              {knob("Light")}
+              {knob("Chaos")}
             </Section>
             <Section title="Output" className={onPhone("Output")} fine={midiControls}>
               {OUTPUTS.map((label) => fader(label, true))}
               {/* The power button already sits in the tab bar */}
               <div className="self-center">
-                <RoundButton bare label="Cómo funciona" path={INFO} onClick={() => info.current?.showModal()} />
+                <RoundButton bare label="How it works" path={INFO} onClick={() => info.current?.showModal()} />
               </div>
             </Section>
           </div>
@@ -642,33 +799,33 @@ export function Ambient() {
       >
         <div className="p-6">
           <h2 id="como-funciona" className="font-display text-3xl uppercase">
-            Cómo funciona
+            How it works
           </h2>
           <ul className="mt-4 flex flex-col gap-3 font-mono">
             <li>
-              <strong>Enciéndelo</strong> con ⏻ y gira los knobs arrastrando arriba o abajo, o con las flechas. Doble clic y vuelven a su valor inicial.
+              <strong>Switch it on</strong> with ⏻ and turn the knobs by dragging up or down, or with the arrow keys; slide the faders the same way. Double-click to put one back where it started.
             </li>
             <li>
-              <strong>Toca el cielo</strong> para soltar notas: más agudas a la derecha, más brillantes arriba. Arrastrando tocas varias seguidas.
+              <strong>Touch the sky</strong> to drop notes: higher to the right, brighter towards the top. Drag to play several in a row.
             </li>
             <li>
-              <strong>Con el teclado</strong>, las teclas del 1 al 0 tocan diez notas de la escala, y Z y X bajan y suben una octava.
+              <strong>On the keyboard</strong>, keys 1 to 0 play ten notes of the scale, and Z and X move down and up an octave. Shift and the letter of a note (C to B) changes key; the same letter again goes up to its sharp.
             </li>
             <li>
-              <strong>Espacio graba un loop</strong> de las notas que toques: púlsalo para empezar, otra vez para cerrarlo y que suene en bucle, y otra para grabar encima. Ctrl+Z (o Cmd+Z) quita la última capa y Retroceso lo borra entero.
+              <strong>Space records a loop</strong> of the notes you play: press it to start, again to close it and hear it go round, and again to record on top. Ctrl+Z (or Cmd+Z) takes off the last layer and Backspace clears it all.
             </li>
             <li>
-              <strong>Azar</strong> es el volumen de las notas que caen solas; <strong>Tus notas</strong>, el de las que tocas tú.
+              <strong>Random</strong> is how loud the notes that fall by themselves are; <strong>Keys</strong>, the ones you play.
             </li>
             <li>
-              <strong>Por MIDI</strong>, conecta un teclado o un controlador desde la sección Output (en Chrome, Edge o Firefox). Los knobs de un Akai MPK mini funcionan sin configurar nada, y con Asignar MIDI enlazas cualquier mando a cualquier knob.
+              <strong>Over MIDI</strong>, connect a keyboard or a controller from the Output section (in Chrome, Edge or Firefox). The knobs on an Akai MPK mini work without setting anything up, and Assign MIDI links any control to any knob or fader.
             </li>
             <li>
-              <strong>Los controles se esconden</strong> si no tocas nada en un rato, y el cielo se queda solo; vuelven al mover el ratón o tocar la pantalla. Con el icono de la esquina, pantalla completa.
+              <strong>The controls hide</strong> when nothing is touched for a while, leaving the sky alone; they come back when you move the mouse or touch the screen. The icon in the corner goes full screen.
             </li>
           </ul>
           <button onClick={() => info.current?.close()} className="mt-6 border border-current px-3 py-1 font-mono uppercase hover:text-white">
-            Cerrar
+            Close
           </button>
         </div>
       </dialog>

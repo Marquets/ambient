@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MODES } from "@/lib/ambient";
 import { randomPreset } from "./preset";
+import { SCENES } from "./sky";
 
 describe("randomPreset", () => {
   it("stays inside each setting's range at either end of the draw", () => {
@@ -9,6 +10,7 @@ describe("randomPreset", () => {
       expect(p.key).toBeGreaterThanOrEqual(0);
       expect(p.key).toBeLessThan(12);
       expect(Object.keys(MODES)).toContain(p.mode);
+      expect(SCENES).toContain(p.scene);
       expect(p.light).toBeGreaterThanOrEqual(0.15);
       expect(p.light).toBeLessThanOrEqual(0.95);
       expect(p.synth.attack).toBeGreaterThanOrEqual(0.005);

@@ -4,7 +4,7 @@ import { noteDegree } from "./midi";
 
 describe("noteDegree", () => {
   const la = 9;
-  const dorian = MODES.Dórico;
+  const dorian = MODES.Dorian;
 
   it("plays the key's root on the A above middle C", () => {
     expect(noteDegree(69, la, dorian)).toBe(0);

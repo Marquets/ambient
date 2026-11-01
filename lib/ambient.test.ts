@@ -3,12 +3,12 @@ import { MODES, degreeHz, passed, touchDegree } from "./ambient";
 
 describe("degreeHz", () => {
   it("tunes the key's root", () => {
-    expect(degreeHz(9, MODES.Eólico, 0)).toBeCloseTo(220, 1);
+    expect(degreeHz(9, MODES.Aeolian, 0)).toBeCloseTo(220, 1);
   });
 
   it("carries on into the next octave", () => {
-    expect(degreeHz(0, MODES.Pentatónica, 5)).toBeCloseTo(261.62, 1);
-    expect(degreeHz(0, MODES.Dórico, 9)).toBeCloseTo(2 * degreeHz(0, MODES.Dórico, 2), 5);
+    expect(degreeHz(0, MODES.Pentatonic, 5)).toBeCloseTo(261.62, 1);
+    expect(degreeHz(0, MODES.Dorian, 9)).toBeCloseTo(2 * degreeHz(0, MODES.Dorian, 2), 5);
   });
 });
 

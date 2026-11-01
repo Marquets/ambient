@@ -3,10 +3,10 @@ export const DEFAULT_BINDINGS: Record<number, string> = {
   70: "Volume",
   71: "Pad",
   72: "Drone",
-  73: "Lluvia",
-  74: "Azar",
-  75: "Tus notas",
-  76: "Luz",
+  73: "Rain",
+  74: "Random",
+  75: "Keys",
+  76: "Light",
   77: "Pitch",
 };
 

@@ -1,4 +1,5 @@
 import { PAD_CHORD, degreeHz } from "@/lib/ambient";
+import type { Scene } from "./sky";
 
 export type Channel = "pad" | "drone" | "lluvia" | "notas" | "lienzo";
 // amount is how much of every channel goes in; time in seconds, repeats the feedback, color the damping in Hz
@@ -11,6 +12,49 @@ export type Synth = { wave: OscillatorType; attack: number; decay: number; cutof
 export type Tape = { saturation: number; wow: number; flutter: number };
 
 const NOTE_TICK_MS = 400;
+// How long the pad and the drone fade out and back in when the scene changes their sound
+const RETIMBRE_S = 0.25;
+
+// How the pad and the drone sound in each scene: the pad's waveform, how far its two voices per
+// note drift apart (cents), how loud each note is, and its filter (Hz, Q) swept slowly (Hz, depth
+// in Hz); the drone's two tones (a ratio over the root, a waveform and a level) and how deeply and
+// fast its volume laps
+type Timbre = {
+  pad: { wave: OscillatorType; detune: number; level: number; cutoff: number; q: number; sweep: number; depth: number };
+  drone: { ratio: number; wave: OscillatorType; level: number }[];
+  lap: { depth: number; hz: number };
+};
+const TIMBRES: Record<Scene, Timbre> = {
+  // Two saws a little apart per note, so the pad drifts instead of buzzing; a root and its fifth
+  Sky: {
+    pad: { wave: "sawtooth", detune: 7, level: 0.06, cutoff: 900, q: 1, sweep: 0.05, depth: 400 },
+    drone: [
+      { ratio: 1, wave: "sine", level: 0.5 },
+      { ratio: 1.5, wave: "triangle", level: 0.15 },
+    ],
+    lap: { depth: 0, hz: 0.25 },
+  },
+  // Pure sines a breath apart through an open filter that swells slowly, like a glass harmonica;
+  // a root and a faint twelfth above it, rising and falling like a slow tide
+  Pond: {
+    pad: { wave: "sine", detune: 4, level: 0.16, cutoff: 2400, q: 0.7, sweep: 0.07, depth: 600 },
+    drone: [
+      { ratio: 1, wave: "sine", level: 0.5 },
+      { ratio: 3, wave: "sine", level: 0.06 },
+    ],
+    lap: { depth: 0.3, hz: 0.12 },
+  },
+  // Soft triangles through a filter that opens and closes very slowly, like a bloom breathing;
+  // a root and its octave, swelling gently
+  Flower: {
+    pad: { wave: "triangle", detune: 9, level: 0.09, cutoff: 1800, q: 2, sweep: 0.03, depth: 500 },
+    drone: [
+      { ratio: 1, wave: "sine", level: 0.45 },
+      { ratio: 2, wave: "triangle", level: 0.1 },
+    ],
+    lap: { depth: 0.15, hz: 0.08 },
+  },
+};
 
 function noise(ctx: AudioContext, seconds: number, decay: number) {
   const length = ctx.sampleRate * seconds;
@@ -31,6 +75,7 @@ export function createEngine() {
   // Semitones on top of the key, not rounded, so turning the knob slides everything
   let pitch = 0;
   let synth: Synth = { wave: "sine", attack: 0.01, decay: 3.5, cutoff: 6000, resonance: 1 };
+  let timbre = TIMBRES.Sky;
 
   const out = ctx.createDynamicsCompressor();
   out.connect(ctx.destination);
@@ -103,36 +148,46 @@ export function createEngine() {
   };
   const levels: Record<Channel, GainNode> = { pad: bus(), drone: bus(), lluvia: bus(), notas: bus(), lienzo: bus() };
 
+  // The pad: two voices per chord note through a swept filter, sounding as the scene's timbre says
   const padFilter = ctx.createBiquadFilter();
   padFilter.type = "lowpass";
-  padFilter.frequency.value = 900;
+  padFilter.frequency.value = timbre.pad.cutoff;
+  padFilter.Q.value = timbre.pad.q;
   padFilter.connect(levels.pad);
   const sweep = ctx.createOscillator();
-  sweep.frequency.value = 0.05;
+  sweep.frequency.value = timbre.pad.sweep;
   const sweepDepth = ctx.createGain();
-  sweepDepth.gain.value = 400;
+  sweepDepth.gain.value = timbre.pad.depth;
   sweep.connect(sweepDepth).connect(padFilter.frequency);
-  // Two slightly detuned saws per chord note, so the pad drifts instead of buzzing
   const voices = [0, 1, 2, 3].map(() => {
     const gain = ctx.createGain();
-    gain.gain.value = 0.06;
+    gain.gain.value = timbre.pad.level;
     gain.connect(padFilter);
-    return [-7, 7].map((detune) => {
+    const oscs = [-1, 1].map((side) => {
       const osc = ctx.createOscillator();
-      osc.type = "sawtooth";
-      osc.detune.value = detune;
+      osc.type = timbre.pad.wave;
+      osc.detune.value = side * timbre.pad.detune;
       osc.connect(gain);
       return osc;
     });
+    return { gain, oscs };
   });
 
-  const drone = [1, 1.5].map((ratio) => {
+  // The drone: two tones over the root, through a gain an LFO can make lap
+  const lapping = ctx.createGain();
+  lapping.connect(levels.drone);
+  const lap = ctx.createOscillator();
+  lap.frequency.value = timbre.lap.hz;
+  const lapDepth = ctx.createGain();
+  lapDepth.gain.value = timbre.lap.depth;
+  lap.connect(lapDepth).connect(lapping.gain);
+  const drone = timbre.drone.map(({ wave, level }) => {
     const osc = ctx.createOscillator();
-    osc.type = ratio === 1 ? "sine" : "triangle";
+    osc.type = wave;
     const gain = ctx.createGain();
-    gain.gain.value = ratio === 1 ? 0.5 : 0.15;
-    osc.connect(gain).connect(levels.drone);
-    return { osc, ratio };
+    gain.gain.value = level;
+    osc.connect(gain).connect(lapping);
+    return { osc, gain };
   });
 
   const rain = ctx.createBufferSource();
@@ -150,8 +205,8 @@ export function createEngine() {
 
   function tune(glide: number) {
     const now = ctx.currentTime;
-    PAD_CHORD.forEach((degree, i) => voices[i].forEach((osc) => osc.frequency.setTargetAtTime(degreeHz(key + pitch, scale, degree), now, glide)));
-    for (const { osc, ratio } of drone) osc.frequency.setTargetAtTime((degreeHz(key + pitch, scale, 0) / 2) * ratio, now, glide);
+    PAD_CHORD.forEach((degree, i) => voices[i].oscs.forEach((osc) => osc.frequency.setTargetAtTime(degreeHz(key + pitch, scale, degree), now, glide)));
+    drone.forEach(({ osc }, i) => osc.frequency.setTargetAtTime((degreeHz(key + pitch, scale, 0) / 2) * timbre.drone[i].ratio, now, glide));
   }
 
   // A note two octaves up from the pad, shaped by the synth settings; brightness adds its upper
@@ -186,10 +241,43 @@ export function createEngine() {
     });
   }
 
-  for (const v of voices) for (const osc of v) osc.start();
+  for (const v of voices) for (const osc of v.oscs) osc.start();
   for (const { osc } of drone) osc.start();
   sweep.start();
+  lap.start();
   rain.start();
+
+  // Faded out, the new sound set while silent, then faded back in, so the change doesn't click
+  let retimbre: ReturnType<typeof setTimeout> | undefined;
+  function setTimbre(next: Timbre) {
+    if (next === timbre) return;
+    timbre = next;
+    const now = ctx.currentTime;
+    for (const { gain } of [...voices, ...drone]) gain.gain.setTargetAtTime(0, now, RETIMBRE_S / 4);
+    clearTimeout(retimbre);
+    retimbre = setTimeout(() => {
+      const now = ctx.currentTime;
+      const { pad } = timbre;
+      for (const { gain, oscs } of voices) {
+        oscs.forEach((osc, side) => {
+          osc.type = pad.wave;
+          osc.detune.value = (side ? 1 : -1) * pad.detune;
+        });
+        gain.gain.setTargetAtTime(pad.level, now, RETIMBRE_S / 2);
+      }
+      padFilter.frequency.value = pad.cutoff;
+      padFilter.Q.setTargetAtTime(pad.q, now, 0.05);
+      sweep.frequency.value = pad.sweep;
+      sweepDepth.gain.value = pad.depth;
+      drone.forEach(({ osc, gain }, i) => {
+        osc.type = timbre.drone[i].wave;
+        gain.gain.setTargetAtTime(timbre.drone[i].level, now, RETIMBRE_S / 2);
+      });
+      lap.frequency.value = timbre.lap.hz;
+      lapDepth.gain.setTargetAtTime(timbre.lap.depth, now, 0.1);
+      tune(0);
+    }, RETIMBRE_S * 1000);
+  }
 
   // The brighter the light, the more often a note falls
   const notes = setInterval(() => {
@@ -243,6 +331,10 @@ export function createEngine() {
       clean.gain.setTargetAtTime(1 - saturation, now, 0.05);
       worn.frequency.setTargetAtTime(12000 - saturation * 7000, now, 0.05);
     },
+    // Each scene gives the pad and the drone their own sound
+    setScene(scene: Scene) {
+      setTimbre(TIMBRES[scene]);
+    },
     setSynth(value: Synth) {
       synth = value;
     },
@@ -269,6 +361,7 @@ export function createEngine() {
     resume: () => ctx.resume(),
     destroy() {
       clearInterval(notes);
+      clearTimeout(retimbre);
       ctx.close();
     },
   };

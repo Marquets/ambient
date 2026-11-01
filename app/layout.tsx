@@ -7,14 +7,14 @@ const spaceMono = Space_Mono({ variable: "--font-space-mono", weight: ["400", "7
 
 export const metadata: Metadata = {
   title: "Le Ciel",
-  description: "Un sinte generativo con un cielo de nubes que reacciona al sonido",
+  description: "A generative synth under a sky of clouds that answers the sound",
 };
 
 export const viewport: Viewport = { themeColor: "#000000" };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="es" className={`${anton.variable} ${spaceMono.variable} h-full antialiased`}>
+    <html lang="en" className={`${anton.variable} ${spaceMono.variable} h-full antialiased`}>
       <body className="min-h-full bg-black font-sans text-line">
         <main>{children}</main>
       </body>

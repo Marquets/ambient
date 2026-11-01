@@ -11,14 +11,14 @@ const rgb = (hex: string): RGB => [0, 2, 4].map((i) => parseInt(hex.slice(i + 1,
 const palette = (...hexes: [string, string, string]) => hexes.map(rgb) as Palette;
 const mix = (a: Palette, b: Palette, t: number) => a.map((c, i) => c.map((v, j) => v + (b[i][j] - v) * t)) as Palette;
 
-// Each mode's daylight, after its character; Dórico keeps Cloudscape's own sky. The clouds stop
+// Each mode's daylight, after its character; Dorian keeps Cloudscape's own sky. The clouds stop
 // short of white, a little toward the sky's colour, so a full screen of them doesn't dazzle
 const DAYS: Record<string, Palette> = {
-  Dórico: palette("#87ceeb", "#d6e3ec", "#e4ebf0"),
-  Lidio: palette("#b5e2f7", "#dce9f0", "#e7eff4"),
-  Eólico: palette("#8a7fc0", "#c9bde2", "#ddd6ec"),
-  Mixolidio: palette("#e9a75a", "#e8cca0", "#eedcc2"),
-  Pentatónica: palette("#f1a39a", "#e9bfb6", "#eed7d0"),
+  Dorian: palette("#87ceeb", "#d6e3ec", "#e4ebf0"),
+  Lydian: palette("#b5e2f7", "#dce9f0", "#e7eff4"),
+  Aeolian: palette("#8a7fc0", "#c9bde2", "#ddd6ec"),
+  Mixolydian: palette("#e9a75a", "#e8cca0", "#eedcc2"),
+  Pentatonic: palette("#f1a39a", "#e9bfb6", "#eed7d0"),
 };
 const NIGHT = palette("#0a1430", "#3e4a66", "#8a96b4");
 const DAWN = palette("#e49ab0", "#f8d5d8", "#fff1ec");
@@ -54,7 +54,7 @@ function lit(mode: string, light: number): Palette {
 }
 
 // Every number the shader takes, sent as u_<name>
-const SCALARS = ["time", "clock", "rain", "pad", "halo", "warp", "width", "pulse"] as const;
+const SCALARS = ["time", "clock", "rain", "pad", "halo", "warp", "width", "pulse", "light"] as const;
 
 export type Frame = Record<(typeof SCALARS)[number], number> & {
   colors: Palette;
@@ -66,9 +66,10 @@ const VERTEX = `
 attribute vec2 position;
 void main() { gl_Position = vec4(position, 0.0, 1.0); }`;
 
-const FRAGMENT = `
+// What every scene shares: what it's told each frame, and the noise its pictures are made of
+const COMMON = `
 precision highp float;
-uniform float u_time, u_clock, u_rain, u_pad, u_halo, u_warp, u_width, u_pulse;
+uniform float u_time, u_clock, u_rain, u_pad, u_halo, u_warp, u_width, u_pulse, u_light;
 uniform vec2 u_resolution;
 uniform vec3 u_bottom, u_middle, u_top;
 uniform vec4 u_stars[${MAX_STARS}];
@@ -87,18 +88,17 @@ float noise(vec2 p) {
   return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
 }
 float rand(float n) { return fract(sin(n * 12.9898) * 43758.5453); }
-// One layer of rain at pixel p: a drop every spacing px across, falling speed screens a second,
-// repeats drops down a column, each len of the fall long and width px wide, in a density share
-// of the columns; slanted, and shuffled so no grid shows. The tail trails above the head.
-float rain(vec2 p, float spacing, float speed, float repeats, float len, float width, float density, float seed) {
-  p.x += p.y * 0.12;
-  float cx = p.x / spacing + seed * 17.0;
-  float column = floor(cx);
-  float dx = (fract(cx) - 0.5 - (rand(column + seed) - 0.5) * 0.6) * spacing;
-  float fall = 0.8 + 0.4 * rand(column + seed * 2.0);
-  float drop = fract(-p.y / u_resolution.y * repeats - u_clock * speed * fall + rand(column + seed * 3.0));
-  float tail = smoothstep(1.0 - len * (0.7 + 0.6 * rand(column + seed * 4.0)), 1.0, drop);
-  return (1.0 - smoothstep(0.0, width, abs(dx))) * tail * tail * step(1.0 - density, rand(column + seed * 5.0));
+// The night's stars at pixel p: now and then a cell of the grid holds one, somewhere inside it, a
+// few brighter than the rest, each twinkling at its own pace
+float starfield(vec2 p) {
+  float size = 10.0;
+  vec2 cell = floor(p / size);
+  float h = hash(cell);
+  if (h < 0.98) return 0.0;
+  vec2 at = (cell + 0.2 + 0.6 * vec2(hash(cell + 7.1), hash(cell + 3.7))) * size;
+  float bright = pow(hash(cell + 1.3), 3.0);
+  float twinkle = 0.65 + 0.35 * sin(u_clock * (1.0 + 3.0 * hash(cell + 5.9)) + h * 40.0);
+  return smoothstep(1.3 + bright * 2.0, 0.0, length(p - at)) * (0.5 + 0.5 * bright) * twinkle;
 }
 float fbm(vec2 p, float t) {
   float v = 0.0;
@@ -113,6 +113,25 @@ float fbm(vec2 p, float t) {
     fi += 1.0;
   }
   return v;
+}
+// How far into the night it is: 1 in full night, 0 from just before dawn
+float night() { return 1.0 - smoothstep(0.02, 0.22, u_light); }
+`;
+
+// The sky, looking up: clouds that each note lights from within, and rain falling past
+const SKY = `${COMMON}
+// One layer of rain at pixel p: a drop every spacing px across, falling speed screens a second,
+// repeats drops down a column, each len of the fall long and width px wide, in a density share
+// of the columns; slanted, and shuffled so no grid shows. The tail trails above the head.
+float rain(vec2 p, float spacing, float speed, float repeats, float len, float width, float density, float seed) {
+  p.x += p.y * 0.12;
+  float cx = p.x / spacing + seed * 17.0;
+  float column = floor(cx);
+  float dx = (fract(cx) - 0.5 - (rand(column + seed) - 0.5) * 0.6) * spacing;
+  float fall = 0.8 + 0.4 * rand(column + seed * 2.0);
+  float drop = fract(-p.y / u_resolution.y * repeats - u_clock * speed * fall + rand(column + seed * 3.0));
+  float tail = smoothstep(1.0 - len * (0.7 + 0.6 * rand(column + seed * 4.0)), 1.0, drop);
+  return (1.0 - smoothstep(0.0, width, abs(dx))) * tail * tail * step(1.0 - density, rand(column + seed * 5.0));
 }
 
 void main() {
@@ -145,6 +164,8 @@ void main() {
   float bandHigh = smoothstep(0.7, 0.7 + 0.25 * u_width, pattern);
 
   vec3 color = mix(mix(u_bottom, u_middle, bandLow), u_top, bandHigh);
+  // Stars come out in the clear sky at night and fade before dawn; the clouds hide them
+  color += vec3(0.9, 0.93, 1.0) * starfield(gl_FragCoord.xy) * night() * (1.0 - bandLow);
   color *= 1.0 + u_pulse * 0.15;
   // Tinted rather than added to, so it shows on a white cloud too; strongest where there's cloud
   // to light, faint in the clearing it opened
@@ -162,7 +183,11 @@ void main() {
   gl_FragColor = vec4(color, 1.0);
 }`;
 
-/** Draws a frame from `read()` on every animation frame until the returned stop is called */
+// Every scene the visuals can show: this sky, the pond (pond.ts) or the flower, a film
+export const SCENES = ["Sky", "Pond", "Flower"] as const;
+export type Scene = (typeof SCENES)[number];
+
+/** Draws the sky from `read()` on every animation frame until the returned stop is called */
 export function startSky(canvas: HTMLCanvasElement, read: () => Frame) {
   const gl = canvas.getContext("webgl");
   // shortcut: without WebGL the canvas stays a dark box but still plays notes
@@ -171,11 +196,12 @@ export function startSky(canvas: HTMLCanvasElement, read: () => Frame) {
   const program = gl.createProgram()!;
   for (const [type, source] of [
     [gl.VERTEX_SHADER, VERTEX],
-    [gl.FRAGMENT_SHADER, FRAGMENT],
+    [gl.FRAGMENT_SHADER, SKY],
   ] as const) {
     const shader = gl.createShader(type)!;
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(shader));
     gl.attachShader(program, shader);
   }
   gl.linkProgram(program);
@@ -211,5 +237,8 @@ export function startSky(canvas: HTMLCanvasElement, read: () => Frame) {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   };
   frame = requestAnimationFrame(draw);
-  return () => cancelAnimationFrame(frame);
+  return () => {
+    cancelAnimationFrame(frame);
+    gl.deleteProgram(program);
+  };
 }

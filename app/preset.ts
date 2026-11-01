@@ -1,10 +1,11 @@
 import { KEYS, MODES } from "@/lib/ambient";
 import type { Channel, Echo, Reverb, Synth, Tape } from "./engine";
+import { SCENES } from "./sky";
 
 const WAVES: OscillatorType[] = ["sine", "triangle", "sawtooth", "square"];
 
 /**
- * A different sky and sound every time the page opens: each setting drawn from a range that
+ * A different scene and sound every time the page opens: each setting drawn from a range that
  * sounds good, never from the whole of a knob's. The volume and the pitch stay as they are, so it
  * never comes in too loud, and the key already moves the tuning.
  */
@@ -41,5 +42,6 @@ export function randomPreset(random = Math.random) {
     // Short of full night, where the sky is nearly black
     light: between(0.15, 0.95),
     chaos: between(0.5, 2),
+    scene: pick(SCENES),
   };
 }

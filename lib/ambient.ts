@@ -1,12 +1,12 @@
-export const KEYS = ["Do", "Do♯", "Re", "Mi♭", "Mi", "Fa", "Fa♯", "Sol", "La♭", "La", "Si♭", "Si"];
+export const KEYS = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
 
 // Semitones above the key
 export const MODES: Record<string, number[]> = {
-  Dórico: [0, 2, 3, 5, 7, 9, 10],
-  Lidio: [0, 2, 4, 6, 7, 9, 11],
-  Eólico: [0, 2, 3, 5, 7, 8, 10],
-  Mixolidio: [0, 2, 4, 5, 7, 9, 10],
-  Pentatónica: [0, 3, 5, 7, 10],
+  Dorian: [0, 2, 3, 5, 7, 9, 10],
+  Lydian: [0, 2, 4, 6, 7, 9, 11],
+  Aeolian: [0, 2, 3, 5, 7, 8, 10],
+  Mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  Pentatonic: [0, 3, 5, 7, 10],
 };
 
 // The pad holds the key's chord: four degrees stacked a third apart
