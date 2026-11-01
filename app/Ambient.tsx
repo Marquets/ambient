@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type ComponentProps, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps, type PointerEvent, type ReactNode } from "react";
 import { KEYS, MODES, passed, touchDegree } from "@/lib/ambient";
-import { createEngine, type Channel, type Echo, type Engine, type Reverb, type Synth } from "./engine";
+import { createEngine, type Channel, type Echo, type Engine, type Reverb, type Synth, type Tape } from "./engine";
+import { Fader } from "./Fader";
 import { Knob } from "./Knob";
 import { DEFAULT_BINDINGS, noteDegree } from "./midi";
+import { randomPreset } from "./preset";
 import { MAX_STARS, skyColors, startSky } from "./sky";
 
 const CHANNELS: { channel: Channel; label: string }[] = [
@@ -20,6 +22,8 @@ const ECHO: Echo = { amount: 0.3, time: 0.6, repeats: 0.45, color: 2500 };
 const REVERB: Reverb = { amount: 0.4, size: 5, color: 6000 };
 const MASTER = { volume: 0.8, light: 0.5, pitch: 0 };
 const SYNTH: Synth = { wave: "sine", attack: 0.01, decay: 3.5, cutoff: 6000, resonance: 1 };
+// A touch of tape from the start, so it sounds worn before anyone reaches for it
+const TAPE: Tape = { saturation: 0.2, wow: 0.15, flutter: 0.15 };
 const WAVES: { wave: OscillatorType; label: string; symbol: string }[] = [
   { wave: "sine", label: "Sine", symbol: "∿" },
   { wave: "triangle", label: "Triangle", symbol: "△" },
@@ -27,11 +31,13 @@ const WAVES: { wave: OscillatorType; label: string; symbol: string }[] = [
   { wave: "square", label: "Square", symbol: "⊓" },
 ];
 // Only the picture: chaos is how much the arc writhes
-const VISUAL = { chaos: 1, saturation: 1 };
+const VISUAL = { chaos: 1 };
 // How long the controls stay over the sky after the last move
-const BAR_MS = 4000;
+const BAR_MS = 10_000;
 const MIDI_KEY = "ambient-midi";
-const SECTIONS = ["Mixer", "Le Jazz", "Oscillator", "FX", "Cielo", "Output"];
+const SECTIONS = ["Mixer", "Oscillator", "Le Jazz", "Tape", "FX", "Ciel", "Output"];
+// The faders at the end: the master volume and how loud each effect comes back
+const OUTPUTS = ["Volume", "Reverb", "Delay"];
 // Empty, recording the first pass, playing it round, or playing it while recording on top
 type Looper = "empty" | "recording" | "playing" | "overdub";
 const LOOPER_LABELS: Record<Looper, string> = { empty: "", recording: "● Rec", playing: "⟳ Loop", overdub: "● Encima" };
@@ -43,9 +49,9 @@ const percent = (v: number) => `${Math.round(v * 100)}%`;
 const seconds = (v: number) => (v < 1 ? `${Math.round(v * 1000)}ms` : `${v.toFixed(1)}s`);
 const kHz = (v: number) => `${(v / 1000).toFixed(1)}k`;
 
-type Settings = { key: number; scale: number[]; levels: typeof LEVELS; echo: Echo; reverb: Reverb; master: typeof MASTER; synth: Synth };
+type Settings = { key: number; scale: number[]; levels: typeof LEVELS; echo: Echo; reverb: Reverb; master: typeof MASTER; synth: Synth; tape: Tape };
 
-function sync(e: Engine, { key, scale, levels, echo, reverb, master, synth }: Settings) {
+function sync(e: Engine, { key, scale, levels, echo, reverb, master, synth, tape }: Settings) {
   e.setKey(key, scale);
   for (const { channel } of CHANNELS) e.setLevel(channel, levels[channel]);
   e.setEcho(echo);
@@ -54,6 +60,7 @@ function sync(e: Engine, { key, scale, levels, echo, reverb, master, synth }: Se
   e.setLight(master.light);
   e.setPitch(master.pitch);
   e.setSynth(synth);
+  e.setTape(tape);
 }
 
 // A note's star, kept as a degree so one set off with an older scale still lands in a column
@@ -98,13 +105,32 @@ export function Ambient() {
   const [master, setMaster] = useState(MASTER);
   const [visual, setVisual] = useState(VISUAL);
   const [synth, setSynth] = useState(SYNTH);
+  const [tape, setTape] = useState(TAPE);
   const [key, setKey] = useState(9);
   const [mode, setMode] = useState("Dórico");
   const scale = MODES[mode];
 
+  // Every visit opens on a different sky and sound. Drawn after hydrating, since the server can't
+  // know the draw, but before the first paint, so the defaults never show; double clicks still go
+  // back to the defaults
+  useLayoutEffect(() => {
+    const p = randomPreset();
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setKey(p.key);
+    setMode(p.mode);
+    setLevels(p.levels);
+    setSynth(p.synth);
+    setEcho(p.echo);
+    setReverb(p.reverb);
+    setTape(p.tape);
+    setMaster((s) => ({ ...s, light: p.light }));
+    setVisual({ chaos: p.chaos });
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, []);
+
   useEffect(() => {
-    if (engine.current) sync(engine.current, { key, scale, levels, echo, reverb, master, synth });
-  }, [key, scale, levels, echo, reverb, master, synth]);
+    if (engine.current) sync(engine.current, { key, scale, levels, echo, reverb, master, synth, tape });
+  }, [key, scale, levels, echo, reverb, master, synth, tape]);
   useEffect(() => () => engine.current?.destroy(), []);
 
   // The sky always fills the window. The controls come up over it on any move, tap or key and
@@ -222,7 +248,6 @@ export function Ambient() {
         warp: visual.chaos,
         width: 0.4 + (reverb.size / 10) * 1.2,
         pulse,
-        saturation: visual.saturation,
         stars,
       };
     });
@@ -233,7 +258,7 @@ export function Ambient() {
     const session = (navigator as { audioSession?: { type: string } }).audioSession;
     if (session) session.type = "playback";
     // Synced here too, not left to the effect: a first tap on the canvas plays its note straight away
-    if (!engine.current) sync((engine.current = createEngine()), { key, scale, levels, echo, reverb, master, synth });
+    if (!engine.current) sync((engine.current = createEngine()), { key, scale, levels, echo, reverb, master, synth, tape });
     engine.current.resume();
     setOn(true);
   }
@@ -397,7 +422,11 @@ export function Ambient() {
     { label: "Size", value: reverb.size, min: 1, max: 10, initial: REVERB.size, onChange: (size) => setReverb((s) => ({ ...s, size })), format: (v) => `${v.toFixed(1)}s` },
     { label: "Reverb tone", value: reverb.color, min: 400, max: 12000, initial: REVERB.color, onChange: (color) => setReverb((s) => ({ ...s, color })), format: kHz },
     { label: "Caos", value: visual.chaos, min: 0, max: 4, initial: VISUAL.chaos, onChange: (chaos) => setVisual((s) => ({ ...s, chaos })), format: (v) => v.toFixed(1) },
-    { label: "Saturación", value: visual.saturation, min: 0, max: 1.5, initial: VISUAL.saturation, onChange: (saturation) => setVisual((s) => ({ ...s, saturation })), format: percent },
+  ];
+  const tapeKnobs: ComponentProps<typeof Knob>[] = [
+    { label: "Saturación", value: tape.saturation, min: 0, max: 1, initial: TAPE.saturation, onChange: (saturation) => setTape((s) => ({ ...s, saturation })), format: percent },
+    { label: "Wow", value: tape.wow, min: 0, max: 1, initial: TAPE.wow, onChange: (wow) => setTape((s) => ({ ...s, wow })), format: percent },
+    { label: "Flutter", value: tape.flutter, min: 0, max: 1, initial: TAPE.flutter, onChange: (flutter) => setTape((s) => ({ ...s, flutter })), format: percent },
   ];
   // Clicking a knob picks it while assigning MIDI
   const learnable = (knob: ComponentProps<typeof Knob>) => ({ ...knob, selected: learn === knob.label, onSelect: learn === false ? undefined : () => setLearn(knob.label) });
@@ -416,7 +445,7 @@ export function Ambient() {
         } catch {}
         return setLearn(null);
       }
-      const knob = [...sounds, ...shades, ...extras, ...synthKnobs].find((k) => k.label === bindings.current[a]);
+      const knob = [...sounds, ...shades, ...extras, ...synthKnobs, ...tapeKnobs].find((k) => k.label === bindings.current[a]);
       knob?.onChange(knob.min + (b / 127) * (knob.max - knob.min));
     };
   });
@@ -459,9 +488,12 @@ export function Ambient() {
   // Hidden controls fade out with the pointer, leaving the sky alone
   const fade = `transition-opacity duration-700 motion-reduce:transition-none ${bar ? "" : "pointer-events-none opacity-0"}`;
 
-  const byLabel = Object.fromEntries([...sounds, ...shades, ...extras, ...synthKnobs].map((knob) => [knob.label, knob]));
-  const knob = (label: string, size?: "small" | "big") => <Knob key={label} {...learnable(byLabel[label])} small={size === "small"} big={size === "big"} />;
+  const byLabel = Object.fromEntries([...sounds, ...shades, ...extras, ...synthKnobs, ...tapeKnobs].map((knob) => [knob.label, knob]));
+  const knob = (label: string, small?: "small") => <Knob key={label} {...learnable(byLabel[label])} small={!!small} />;
   const fine = (labels: string[]) => labels.map((label) => knob(label, "small"));
+  // The levels slide like a mixing desk's, the main volume with a master's wider cap
+  const fader = (label: string, tall?: boolean) => <Fader key={label} {...learnable(byLabel[label])} tall={tall} master={label === "Volume"} />;
+  const faders = (tall?: boolean) => CHANNELS.map(({ label }) => fader(label, tall));
   const midiControls = (
     <div className="flex flex-col items-center gap-1">
       {midiButton}
@@ -505,28 +537,36 @@ export function Ambient() {
       <h1 className="sr-only">Le Ciel</h1>
       {/* The controls, to tell whether they are in use */}
       <div ref={panel} className="contents">
-        {/* Every control, small along the bottom, each section with its fine knobs out; wraps where it doesn't fit */}
+        {/* Every control, small along the bottom, each section with its fine knobs out; wraps where it
+            doesn't fit. In the order the sound flows: the mix, what plays and in which key, the tape it
+            goes through, the effects, the sky it draws, and out */}
         <div
-          className={`fixed inset-x-0 bottom-0 flex flex-wrap items-start justify-center gap-x-6 gap-y-3 bg-linear-to-t from-black/40 via-black/15 to-transparent px-4 pt-14 pb-4 font-mono text-[9px] text-white uppercase [text-shadow:0_1px_3px_rgb(0_0_0/0.45)] max-sm:hidden ${fade}`}
+          className={`fixed inset-x-0 bottom-0 flex flex-wrap items-start justify-center gap-x-5 gap-y-3 bg-linear-to-t from-black/40 via-black/15 to-transparent px-4 pt-14 pb-4 font-mono text-[9px] text-white uppercase [text-shadow:0_1px_3px_rgb(0_0_0/0.45)] max-sm:hidden ${fade}`}
         >
-          <Section title="Le Jazz" small>
-            <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
-          </Section>
-          <Section title="Oscillator" small>
-            <div className="w-16 self-center">{waves}</div>
-            {fine(["Cutoff", "Resonance", "Attack", "Decay"])}
-          </Section>
           <Section title="Mixer" small>
-            {fine([...CHANNELS.map(({ label }) => label), "Pitch"])}
+            {faders()}
+          </Section>
+          <div className="flex flex-col items-start gap-3">
+            <Section title="Oscillator" small>
+              <div className="w-16 self-center">{waves}</div>
+              {fine(["Cutoff", "Resonance", "Attack", "Decay"])}
+            </Section>
+            <Section title="Le Jazz" small>
+              <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
+            </Section>
+          </div>
+          <Section title="Tape" small>
+            {fine(["Saturación", "Wow", "Flutter", "Pitch"])}
           </Section>
           <Section title="FX" small>
-            {fine(["Delay", "Reverb", "Delay time", "Feedback", "Delay tone", "Size", "Reverb tone"])}
+            {fine(["Delay time", "Feedback", "Delay tone", "Size", "Reverb tone"])}
           </Section>
-          <Section title="Cielo" small>
-            {fine(["Luz", "Caos", "Saturación"])}
+          <Section title="Ciel" small>
+            {fine(["Luz", "Caos"])}
           </Section>
+          {/* The master and the two effect returns, like a desk's */}
           <Section title="Output" small>
-            {knob("Volume", "small")}
+            {OUTPUTS.map((label) => fader(label))}
             <div className="flex flex-col items-center gap-2 self-center">
               <div className="flex items-center gap-2">
                 <RoundButton label={on ? "Apagar" : "Encender"} path={POWER} pressed={on} onClick={toggle} />
@@ -562,37 +602,29 @@ export function Ambient() {
                 {sheet ? "▾" : "▴"}
               </button>
             </div>
-            <Section title="Le Jazz" className={onPhone("Le Jazz")}>
-              <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
+            <Section title="Mixer" className={onPhone("Mixer")}>
+              {faders(true)}
             </Section>
             <Section title="Oscillator" className={onPhone("Oscillator")} fine={fine(["Attack", "Decay"])}>
               <div className="w-16 self-center">{waves}</div>
               {knob("Cutoff")}
               {knob("Resonance")}
             </Section>
-            <Section title="Mixer" className={onPhone("Mixer")}>
-              {CHANNELS.map(({ label }) => knob(label))}
-              {knob("Pitch")}
+            <Section title="Le Jazz" className={onPhone("Le Jazz")}>
+              <div className="grid w-40 grid-cols-2 gap-2">{tuning}</div>
             </Section>
-            <Section
-              title="FX"
-              className={onPhone("FX")}
-              fine={
-                <div className="flex flex-col items-center gap-2">
-                  <div className="flex gap-3">{fine(["Delay time", "Feedback", "Delay tone"])}</div>
-                  <div className="flex gap-3">{fine(["Size", "Reverb tone"])}</div>
-                </div>
-              }
-            >
-              {knob("Delay")}
-              {knob("Reverb")}
+            <Section title="Tape" className={onPhone("Tape")}>
+              {["Saturación", "Wow", "Flutter", "Pitch"].map((label) => knob(label))}
             </Section>
-            <Section title="Cielo" className={onPhone("Cielo")} fine={fine(["Saturación"])}>
+            <Section title="FX" className={onPhone("FX")} fine={<div className="flex gap-4">{["Size", "Reverb tone"].map((label) => knob(label))}</div>}>
+              {["Delay time", "Feedback", "Delay tone"].map((label) => knob(label))}
+            </Section>
+            <Section title="Ciel" className={onPhone("Ciel")}>
               {knob("Luz")}
               {knob("Caos")}
             </Section>
             <Section title="Output" className={onPhone("Output")} fine={midiControls}>
-              {knob("Volume", "big")}
+              {OUTPUTS.map((label) => fader(label, true))}
               {/* The power button already sits in the tab bar */}
               <div className="self-center">
                 <RoundButton bare label="Cómo funciona" path={INFO} onClick={() => info.current?.showModal()} />
@@ -670,7 +702,7 @@ function Section({ title, fine, small, className, children }: SectionProps) {
   return (
     <section aria-label={title} className={`relative flex min-w-0 flex-col gap-2.5 ${small ? "" : "px-3 py-2"} ${className ?? ""}`}>
       <h2 className={`font-mono text-[10px] font-bold tracking-[0.15em] text-line/80 ${small ? "" : "sr-only"}`}>{title}</h2>
-      <div className={`flex items-start justify-center ${small ? "gap-3" : "gap-4"}`}>{children}</div>
+      <div className={`flex items-start justify-center ${small ? "gap-2" : "gap-4"}`}>{children}</div>
       {fine && <div className="flex items-start justify-center gap-4 pt-2">{fine}</div>}
     </section>
   );

@@ -5,13 +5,12 @@
   --font-display: var(--font-anton);
   --font-mono: var(--font-space-mono);
   --color-accent: #f89028;
-  /* The controls float over the sky, so they are all white: lines, knobs, the volume and
+  /* The controls float over the sky, so they are all white: lines, knobs, faders and
      whatever is switched on, which fills in white. The near-black ground is for the glass
      boxes, the help and what sits on a white fill */
   --color-fondo: #14110e;
   --color-panel: #1e1914;
   --color-line: #ffffff;
   --color-knob: #ffffff;
-  --color-vivo: #ffffff;
   --color-activo: #ffffff;
 }

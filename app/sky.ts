@@ -11,13 +11,14 @@ const rgb = (hex: string): RGB => [0, 2, 4].map((i) => parseInt(hex.slice(i + 1,
 const palette = (...hexes: [string, string, string]) => hexes.map(rgb) as Palette;
 const mix = (a: Palette, b: Palette, t: number) => a.map((c, i) => c.map((v, j) => v + (b[i][j] - v) * t)) as Palette;
 
-// Each mode's daylight, after its character; Dórico keeps Cloudscape's own sky
+// Each mode's daylight, after its character; Dórico keeps Cloudscape's own sky. The clouds stop
+// short of white, a little toward the sky's colour, so a full screen of them doesn't dazzle
 const DAYS: Record<string, Palette> = {
-  Dórico: palette("#87ceeb", "#f8f8f8", "#ffffff"),
-  Lidio: palette("#b5e2f7", "#ffffff", "#ffffff"),
-  Eólico: palette("#8a7fc0", "#d9cdf0", "#f3eefc"),
-  Mixolidio: palette("#e9a75a", "#f8dcb0", "#fff1d9"),
-  Pentatónica: palette("#f1a39a", "#f9cfc6", "#ffece6"),
+  Dórico: palette("#87ceeb", "#d6e3ec", "#e4ebf0"),
+  Lidio: palette("#b5e2f7", "#dce9f0", "#e7eff4"),
+  Eólico: palette("#8a7fc0", "#c9bde2", "#ddd6ec"),
+  Mixolidio: palette("#e9a75a", "#e8cca0", "#eedcc2"),
+  Pentatónica: palette("#f1a39a", "#e9bfb6", "#eed7d0"),
 };
 const NIGHT = palette("#0a1430", "#3e4a66", "#8a96b4");
 const DAWN = palette("#e49ab0", "#f8d5d8", "#fff1ec");
@@ -53,7 +54,7 @@ function lit(mode: string, light: number): Palette {
 }
 
 // Every number the shader takes, sent as u_<name>
-const SCALARS = ["time", "clock", "rain", "pad", "halo", "warp", "width", "pulse", "saturation"] as const;
+const SCALARS = ["time", "clock", "rain", "pad", "halo", "warp", "width", "pulse"] as const;
 
 export type Frame = Record<(typeof SCALARS)[number], number> & {
   colors: Palette;
@@ -67,7 +68,7 @@ void main() { gl_Position = vec4(position, 0.0, 1.0); }`;
 
 const FRAGMENT = `
 precision highp float;
-uniform float u_time, u_clock, u_rain, u_pad, u_halo, u_warp, u_width, u_pulse, u_saturation;
+uniform float u_time, u_clock, u_rain, u_pad, u_halo, u_warp, u_width, u_pulse;
 uniform vec2 u_resolution;
 uniform vec3 u_bottom, u_middle, u_top;
 uniform vec4 u_stars[${MAX_STARS}];
@@ -120,8 +121,9 @@ void main() {
   vec2 p = (uv - 0.5) * aspect;
   vec2 wind = vec2(u_time * 0.1, u_time * 0.02);
 
-  // The pad and the sound itself thicken the clouds; the reverb's size softens their edges
-  float pattern = fbm(p * 2.2 - wind, u_time) + u_pad * 0.15 - 0.09 + u_pulse * 0.1;
+  // The pad and the sound itself thicken the clouds, from a sky that is mostly clear; the reverb's
+  // size softens their edges
+  float pattern = fbm(p * 2.2 - wind, u_time) + u_pad * 0.15 - 0.16 + u_pulse * 0.1;
 
   // Every note lights the cloud it lands in from within and parts it a little, flaring fast and
   // dying slowly; low notes warm, high ones cool. The reverb spreads it, the eco pulses it again.
@@ -133,7 +135,7 @@ void main() {
     if (s.z >= 1.0) continue;
     float d = length(p - (s.xy - 0.5) * aspect);
     float life = (1.0 - s.z) * (1.0 - s.z) * smoothstep(0.0, 0.04, s.z) * s.w;
-    float reach = exp(-d * mix(5.0, 2.5, u_halo));
+    float reach = exp(-d * mix(8.0, 4.0, u_halo));
     open += reach * life * 0.6;
     lit += reach * life;
     glow += mix(vec3(1.0, 0.6, 0.25), vec3(0.45, 0.7, 1.0), s.x) * reach * life;
@@ -157,9 +159,6 @@ void main() {
   // Light against the blue, darker against the white of a cloud, so it reads on both
   float lum = dot(color, vec3(0.299, 0.587, 0.114));
   color = mix(color, mix(vec3(0.95, 0.97, 1.0), vec3(0.58, 0.64, 0.74), smoothstep(0.6, 0.9, lum)), min(streaks, 1.0));
-
-
-  color = mix(vec3(dot(color, vec3(0.299, 0.587, 0.114))), color, u_saturation);
   gl_FragColor = vec4(color, 1.0);
 }`;
 

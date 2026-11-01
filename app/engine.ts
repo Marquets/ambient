@@ -7,6 +7,8 @@ export type Echo = { amount: number; time: number; repeats: number; color: numbe
 export type Reverb = { amount: number; size: number; color: number };
 // How every note sounds: its waveform, attack and decay in seconds, and a low-pass filter (Hz, Q)
 export type Synth = { wave: OscillatorType; attack: number; decay: number; cutoff: number; resonance: number };
+// The whole mix as if off a worn cassette, each 0–1: soft clipping, and the speed wobbling slowly and fast
+export type Tape = { saturation: number; wow: number; flutter: number };
 
 const NOTE_TICK_MS = 400;
 
@@ -40,7 +42,33 @@ export function createEngine() {
   master.connect(out);
   const tone = ctx.createBiquadFilter();
   tone.type = "lowpass";
-  tone.connect(master);
+
+  // Tape: the mix through a short delay whose time wobbles, which bends the pitch, slowly (wow) and
+  // fast (flutter); then a soft clipper blended in for saturation, its highs worn down with it
+  const wobble = ctx.createDelay(0.1);
+  wobble.delayTime.value = 0.02;
+  const lfo = (hz: number) => {
+    const osc = ctx.createOscillator();
+    osc.frequency.value = hz;
+    const depth = ctx.createGain();
+    depth.gain.value = 0;
+    osc.connect(depth).connect(wobble.delayTime);
+    osc.start();
+    return depth;
+  };
+  const wow = lfo(0.6);
+  const flutter = lfo(7);
+  const clean = ctx.createGain();
+  const drive = ctx.createGain();
+  const clipper = ctx.createWaveShaper();
+  clipper.curve = Float32Array.from({ length: 1024 }, (_, i) => Math.tanh((i / 511.5 - 1) * 3));
+  clipper.oversample = "4x";
+  const worn = ctx.createBiquadFilter();
+  worn.type = "lowpass";
+  const dirty = ctx.createGain();
+  tone.connect(wobble);
+  wobble.connect(clean).connect(master);
+  wobble.connect(drive).connect(clipper).connect(worn).connect(dirty).connect(master);
 
   // Eco: a delay fed back into itself through a damping filter
   const echoIn = ctx.createGain();
@@ -202,6 +230,18 @@ export function createEngine() {
       reverbIn.disconnect(reverb);
       reverb.disconnect();
       reverb = next;
+    },
+    setTape({ saturation, wow: slow, flutter: fast }: Tape) {
+      const now = ctx.currentTime;
+      // Up to ±4 ms at 0.6 Hz and ±0.3 ms at 7 Hz: about a quarter of a semitone each at the top
+      wow.gain.setTargetAtTime(slow * 0.004, now, 0.05);
+      flutter.gain.setTargetAtTime(fast * 0.0003, now, 0.05);
+      // The clipper's slope is 3 at rest, so the made-up gain keeps quiet passages as loud as clean
+      const push = 0.3 + saturation * 1.2;
+      drive.gain.setTargetAtTime(push, now, 0.05);
+      dirty.gain.setTargetAtTime(saturation / (3 * push), now, 0.05);
+      clean.gain.setTargetAtTime(1 - saturation, now, 0.05);
+      worn.frequency.setTargetAtTime(12000 - saturation * 7000, now, 0.05);
     },
     setSynth(value: Synth) {
       synth = value;

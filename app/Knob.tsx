@@ -9,8 +9,6 @@ type Props = {
   max: number;
   initial: number;
   small?: boolean;
-  // The panel's main volume, a size up like the Minimoog's output
-  big?: boolean;
   // While MIDI is being assigned, a press picks the knob instead of turning it
   selected?: boolean;
   onSelect?(): void;
@@ -25,14 +23,14 @@ const TRAVEL = 150;
 const STEPS = 24;
 
 /** Turned by dragging up or down; arrows step through it, a double click puts it back where it started */
-export function Knob({ label, value, min, max, initial, small, big, selected, onSelect, onChange, format }: Props) {
+export function Knob({ label, value, min, max, initial, small, selected, onSelect, onChange, format }: Props) {
   const drag = useRef<{ y: number; value: number }>(null);
   const [turning, setTurning] = useState(false);
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
   const step = (max - min) / STEPS;
   const sweep = ((value - min) / (max - min)) * 270;
-  // One colour each for the small knobs, the main ones and the volume; all white over the sky (globals.css)
-  const accent = small ? "text-line" : big ? "text-vivo" : "text-knob";
+  // One colour each for the small knobs and the main ones; both white over the sky (globals.css)
+  const accent = small ? "text-line" : "text-knob";
 
   function onPointerDown(e: PointerEvent<HTMLDivElement>) {
     if (onSelect) return onSelect();
@@ -78,7 +76,7 @@ export function Knob({ label, value, min, max, initial, small, big, selected, on
         onPointerCancel={onPointerUp}
         onDoubleClick={() => onChange(initial)}
         onKeyDown={onKeyDown}
-        className={`relative ${small ? "size-8" : big ? "size-14" : "size-11"} ${accent} ${onSelect ? "cursor-pointer" : "cursor-ns-resize"} ${selected ? "ring-2 ring-activo ring-offset-4 ring-offset-transparent" : ""} touch-none rounded-full outline-offset-6 focus-visible:outline-2 focus-visible:outline-accent`}
+        className={`relative ${small ? "size-8" : "size-11"} ${accent} ${onSelect ? "cursor-pointer" : "cursor-ns-resize"} ${selected ? "ring-2 ring-activo ring-offset-4 ring-offset-transparent" : ""} touch-none rounded-full outline-offset-6 focus-visible:outline-2 focus-visible:outline-accent`}
       >
         {TICKS.map((tick, i) => (
           <div key={tick} aria-hidden className="absolute -inset-[5px]" style={{ rotate: `${tick}deg` }}>
